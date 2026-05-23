@@ -143,14 +143,33 @@ function ActionError({ error }: { error?: { code: string; message: string } | nu
   return <div className="action-error">{error.message || error.code}</div>;
 }
 
+function hasFallbackQuota(account: AccountDoc) {
+  const dailyRemaining = (account.dailyUsage?.limit ?? 0) - (account.dailyUsage?.count ?? 0);
+  return dailyRemaining > 0;
+}
+
+function hasRemoteQuota(account: AccountDoc) {
+  const primary = account.codexUsage?.primaryWindow;
+  const hasPrimary = primary && primary.resetAfterSeconds !== -1;
+
+  if (!hasPrimary) return true;
+
+  const primaryRemaining = hasPrimary ? 100 - Number(primary.usedPercent || 0) : 1;
+  return primaryRemaining > 0;
+}
+
+function isSwitchableAccount(account: AccountDoc) {
+  if (account.status !== "active") return false;
+  if (account.codexUsage?.error) return false;
+  return hasFallbackQuota(account) && hasRemoteQuota(account);
+}
+
 function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: boolean }) {
   const accountsCollection = useCollection<AccountDoc>("accounts", { mode: "server-first", lazy: false });
   const accountAction = useAction(async (action: string, payload?: Record<string, unknown>) => {
     return await accountsCollection.trigger(action, payload);
   });
-  const switchDisabled = accountAction.loading ||
-    account.status !== "active" ||
-    Boolean(account.codexUsage?.error || account.codexUsage?.limitReached);
+  const switchDisabled = accountAction.loading || !isSwitchableAccount(account);
 
   async function selectAccount() {
     await accountAction("select-account", { id: account.id });

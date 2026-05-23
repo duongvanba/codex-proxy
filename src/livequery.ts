@@ -210,6 +210,10 @@ function publishCollectionSnapshot(collection: "accounts" | "reports") {
   publishRealtimeChanges(docs.map((doc) => ({ ref: collection, type: "modified", data: doc })));
 }
 
+function publishAccountRemoved(id: string) {
+  publishRealtimeChanges([{ ref: "accounts", type: "removed", data: { id } }]);
+}
+
 export function addReport(entry: Omit<ReportDocument, "id"> & { id?: string }): ReportDocument {
   const timestamp = typeof entry.timestamp === "number" ? entry.timestamp : Date.now();
   const report: ReportDocument = {
@@ -308,6 +312,7 @@ async function handleAction(action: string, ctx: LivequeryContext, openaiBaseUrl
     if (!result.ok) return error("BAD_REQUEST", result.error ?? "Could not remove account");
     logEvent("account_removed", id);
     addReport({ type: "account_removed", accountId: id, timestamp: Date.now() });
+    publishAccountRemoved(id);
     notifyAccountsChanged();
     return json({ data: { ok: true } });
   }
