@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   LivequeryClient,
@@ -114,6 +114,74 @@ function UsageBar({ label, usage }: { label: string; usage?: UsageWindow }) {
   );
 }
 
+function AccountUsage({ account, now }: { account: AccountDoc; now: number }) {
+  const hasRemoteUsage = account.codexUsage?.primaryWindow || account.codexUsage?.secondaryWindow;
+
+  if (account.codexUsage?.error) {
+    return <div className="error-line">{account.codexUsage.error}</div>;
+  }
+
+  return (
+    <div className="usage-bars">
+      {hasRemoteUsage ? (
+        <>
+          <QuotaBar label="Daily" window={account.codexUsage?.primaryWindow} now={now} />
+          <QuotaBar label="Weekly" window={account.codexUsage?.secondaryWindow} now={now} />
+        </>
+      ) : (
+        <>
+          <UsageBar label="Daily" usage={account.dailyUsage} />
+          <UsageBar label="Weekly" usage={account.weeklyUsage} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ActionError({ error }: { error?: { code: string; message: string } | null }) {
+  if (!error) return null;
+  return <div className="action-error">{error.message || error.code}</div>;
+}
+
+function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: boolean }) {
+  const accountsCollection = useCollection<AccountDoc>("accounts", { mode: "server-first", lazy: false });
+  const accountAction = useAction(async (action: string, payload?: Record<string, unknown>) => {
+    return await accountsCollection.trigger(action, payload);
+  });
+
+  async function selectAccount() {
+    await accountAction("select-account", { id: account.id });
+    await accountsCollection.query({});
+  }
+
+  async function removeAccount() {
+    if (!confirm("Remove this account?")) return;
+    await accountAction("remove-account", { id: account.id });
+    await accountsCollection.query({});
+  }
+
+  return (
+    <div className="action-stack">
+      <div className="actions">
+        {isUsing ? (
+          <span className="running" />
+        ) : (
+          <button disabled={accountAction.loading} onClick={() => void selectAccount()}>
+            {accountAction.loading ? <span className="inline-spinner compact" /> : null}
+            Switch
+          </button>
+        )}
+        {!isUsing && (
+          <button className="danger-btn" disabled={accountAction.loading} onClick={() => void removeAccount()}>
+            Remove
+          </button>
+        )}
+      </div>
+      <ActionError error={accountAction.error} />
+    </div>
+  );
+}
+
 function QuotaBar({ label, window, now }: { label: string; window?: CodexUsageWindow; now: number }) {
   if (!window) return null;
   const isPending = window.resetAfterSeconds === -1;
@@ -145,24 +213,8 @@ function AccountCard({
   accountDoc: LivequeryDocument<AccountDoc>;
   now: number;
 }) {
-  const accountsCollection = useCollection<AccountDoc>("accounts", { mode: "server-first", lazy: false });
   const account = useObservable(accountDoc, accountDoc.value);
-  const accountAction = useAction(async (action: string, payload?: Record<string, unknown>) => {
-    return await accountsCollection.trigger(action, payload);
-  });
-  const isUsing = account.selected && !["rate_limited", "expired"].includes(account.status);
-  const hasRemoteUsage = account.codexUsage?.primaryWindow || account.codexUsage?.secondaryWindow;
-
-  async function selectAccount() {
-    await accountAction("select-account", { id: account.id });
-    await accountsCollection.query({});
-  }
-
-  async function removeAccount() {
-    if (!confirm("Remove this account?")) return;
-    await accountAction("remove-account", { id: account.id });
-    await accountsCollection.query({});
-  }
+  const isUsing = Boolean(account.selected && !["rate_limited", "expired"].includes(account.status));
 
   return (
     <div className={`account-card ${isUsing ? "selected" : account.status}`}>
@@ -174,39 +226,9 @@ function AccountCard({
             .filter(Boolean)
             .join(" · ")}
         </div>
-        {account.codexUsage?.error ? (
-          <div className="error-line">{account.codexUsage.error}</div>
-        ) : (
-          <div className="usage-bars">
-            {hasRemoteUsage ? (
-              <>
-                <QuotaBar label="Daily" window={account.codexUsage?.primaryWindow} now={now} />
-                <QuotaBar label="Weekly" window={account.codexUsage?.secondaryWindow} now={now} />
-              </>
-            ) : (
-              <>
-                <UsageBar label="Daily" usage={account.dailyUsage} />
-                <UsageBar label="Weekly" usage={account.weeklyUsage} />
-              </>
-            )}
-          </div>
-        )}
+        <AccountUsage account={account} now={now} />
       </div>
-      <div className="actions">
-        {isUsing ? (
-          <span className="running" />
-        ) : (
-          <button disabled={accountAction.loading} onClick={() => void selectAccount()}>
-            {accountAction.loading ? <span className="inline-spinner compact" /> : null}
-            Switch
-          </button>
-        )}
-        {!isUsing && (
-          <button className="danger-btn" disabled={accountAction.loading} onClick={() => void removeAccount()}>
-            Remove
-          </button>
-        )}
-      </div>
+      <AccountActions account={account} isUsing={isUsing} />
     </div>
   );
 }
@@ -239,6 +261,51 @@ function ReportRow({ reportDoc }: { reportDoc: LivequeryDocument<ReportDoc> }) {
   );
 }
 
+function StatsGrid({
+  using,
+  active,
+  limited,
+  totalRequests,
+  accountCount,
+}: {
+  using: number;
+  active: number;
+  limited: number;
+  totalRequests: number;
+  accountCount: number;
+}) {
+  return (
+    <section className="stats">
+      <div><span>In use</span><strong>{using || active}</strong></div>
+      <div><span>Rate limited</span><strong>{limited}</strong></div>
+      <div><span>Total requests</span><strong>{totalRequests.toLocaleString()}</strong></div>
+      <div><span>Total accounts</span><strong>{accountCount}</strong></div>
+    </section>
+  );
+}
+
+function ReportsPanel({
+  reports,
+  reportsLoading,
+}: {
+  reports: LivequeryDocument<ReportDoc>[];
+  reportsLoading: unknown;
+}) {
+  const loading = Boolean(reportsLoading);
+  return (
+    <section>
+      <h2>Reports {loading && <span className="section-loading"><span className="inline-spinner" /> loading</span>}</h2>
+      <div className="reports">
+        {reports.length === 0 && loading
+          ? <div className="empty"><span className="inline-spinner" /> Loading reports...</div>
+          : reports.length === 0
+            ? <div className="empty">No reports yet.</div>
+            : reports.slice(0, 200).map((reportDoc) => <ReportRow key={reportDoc.value.id} reportDoc={reportDoc} />)}
+      </div>
+    </section>
+  );
+}
+
 function Dashboard() {
   const accountsCollection = useCollection<AccountDoc>("accounts", { mode: "server-first", lazy: false });
   const reportsCollection = useCollection<ReportDoc>("reports", { mode: "server-first", lazy: false });
@@ -251,6 +318,7 @@ function Dashboard() {
   const [loginInProgress, setLoginInProgress] = useState(false);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [notice, setNotice] = useState<{ type: "error" | "info"; message: string } | null>(null);
 
   const callAction = useAction(async <T,>(action: string, payload?: Record<string, unknown>): Promise<T> => {
     return await accountsCollection.trigger<T>(action, payload) as T;
@@ -280,36 +348,66 @@ function Dashboard() {
   }, []);
 
   async function startLogin() {
-    const win = window.open("about:blank", "_blank");
-    const result = await callAction<{ authorizeUrl: string }>("start-login");
-    setLoginInProgress(true);
-    if (win) win.location.href = result.authorizeUrl;
-    else location.href = result.authorizeUrl;
+    try {
+      const win = window.open("about:blank", "_blank");
+      const result = await callAction<{ authorizeUrl: string }>("start-login");
+      setLoginInProgress(true);
+      setNotice({ type: "info", message: "Login flow started." });
+      if (win) win.location.href = result.authorizeUrl;
+      else location.href = result.authorizeUrl;
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Could not start login." });
+    }
   }
 
   async function copyLoginLink() {
-    const result = await callAction<{ authorizeUrl: string }>("start-login");
-    setLoginInProgress(true);
-    await navigator.clipboard.writeText(result.authorizeUrl);
+    try {
+      const result = await callAction<{ authorizeUrl: string }>("start-login");
+      setLoginInProgress(true);
+      await navigator.clipboard.writeText(result.authorizeUrl);
+      setNotice({ type: "info", message: "Login link copied." });
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Could not copy login link." });
+    }
   }
 
   async function cancelLogin() {
-    const result = await callAction<{ inProgress: boolean }>("cancel-login");
-    setLoginInProgress(Boolean(result.inProgress));
+    try {
+      const result = await callAction<{ inProgress: boolean }>("cancel-login");
+      setLoginInProgress(Boolean(result.inProgress));
+      setNotice({ type: "info", message: "Login flow cancelled." });
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Could not cancel login." });
+    }
   }
 
   async function importCallback() {
     const callbackUrl = prompt("Paste OpenAI callback URL");
     if (!callbackUrl) return;
-    await callAction("import-callback", { callbackUrl });
-    setLoginInProgress(false);
-    await accountsCollection.query({});
+    try {
+      await callAction("import-callback", { callbackUrl });
+      setLoginInProgress(false);
+      await accountsCollection.query({});
+      setNotice({ type: "info", message: "Account imported." });
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Could not import callback." });
+    }
   }
 
   async function setConfigProxy(enabled: boolean) {
-    setProxyEnabled(enabled);
-    const result = await callAction<{ enabled: boolean }>("set-config", { enabled });
-    setProxyEnabled(Boolean(result.enabled));
+    try {
+      const restartCodex = confirm(`${enabled ? "Install" : "Uninstall"} proxy config. Restart Codex now?`);
+      setProxyEnabled(enabled);
+      const result = await callAction<{ enabled: boolean; restarted: boolean }>("set-config", { enabled, restartCodex });
+      setProxyEnabled(Boolean(result.enabled));
+      setNotice({
+        type: "info",
+        message: `Proxy config ${result.enabled ? "installed" : "uninstalled"}${result.restarted ? " and Codex restarted" : ""}.`,
+      });
+    } catch (error) {
+      await refreshControlState().catch(() => {});
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Could not update proxy config." });
+    }
   }
 
   const accounts = accountDocs as LivequeryDocument<AccountDoc>[];
@@ -339,13 +437,15 @@ function Dashboard() {
           <button className="secondary-btn" disabled={callAction.loading || !proxyEnabled} onClick={() => void setConfigProxy(false)}>Uninstall</button>
         </div>
       </section>
+      {notice && <div className={`notice ${notice.type}`}>{notice.message}</div>}
 
-      <section className="stats">
-        <div><span>In use</span><strong>{using || active}</strong></div>
-        <div><span>Rate limited</span><strong>{limited}</strong></div>
-        <div><span>Total requests</span><strong>{totalRequests.toLocaleString()}</strong></div>
-        <div><span>Total accounts</span><strong>{accounts.length}</strong></div>
-      </section>
+      <StatsGrid
+        using={using}
+        active={active}
+        limited={limited}
+        totalRequests={totalRequests}
+        accountCount={accounts.length}
+      />
 
       <section>
         <h2>Accounts</h2>
@@ -364,16 +464,7 @@ function Dashboard() {
         </div>
       </section>
 
-      <section>
-        <h2>Reports {reportsLoading && <span className="section-loading"><span className="inline-spinner" /> loading</span>}</h2>
-        <div className="reports">
-          {reports.length === 0 && reportsLoading
-            ? <div className="empty"><span className="inline-spinner" /> Loading reports...</div>
-            : reports.length === 0
-              ? <div className="empty">No reports yet.</div>
-              : reports.slice(0, 200).map((reportDoc) => <ReportRow key={reportDoc.value.id} reportDoc={reportDoc} />)}
-        </div>
-      </section>
+      <ReportsPanel reports={reports} reportsLoading={reportsLoading} />
     </main>
   );
 }

@@ -58,7 +58,7 @@ function json<T>(payload: LivequeryResult<T>, init?: ResponseInit): Response {
   return Response.json(payload, init);
 }
 
-function collectionResponse<T extends { id: string }>(
+export function collectionResponse<T extends { id: string }>(
   items: T[],
   summary: Record<string, unknown> = {}
 ): LivequeryCollectionResponse<T> {
@@ -149,7 +149,7 @@ function getAction(pathname: string): string | null {
   return decodeURIComponent(pathname.slice(index + marker.length));
 }
 
-function serializeAccount(account: Account, options: { pendingQuotaTimers?: boolean } = {}): AccountDocument {
+export function serializeAccount(account: Account, options: { pendingQuotaTimers?: boolean } = {}): AccountDocument {
   const { accessToken: _accessToken, refreshToken: _refreshToken, idToken: _idToken, ...safeAccount } = account;
   if (options.pendingQuotaTimers && safeAccount.codexUsage) {
     safeAccount.codexUsage = {
@@ -180,15 +180,24 @@ function registerLivequerySubscription(ctx: LivequeryContext) {
   clients.add(clientId);
 }
 
-function publishRealtime(ref: string, type: "added" | "modified" | "removed", data: Record<string, unknown>) {
+type RealtimeChange = {
+  ref: string;
+  type: "added" | "modified" | "removed";
+  data: Record<string, unknown>;
+};
+
+function publishRealtimeChanges(changes: RealtimeChange[]) {
+  if (changes.length === 0) return;
   const targets = new Set([
-    ...realtimeRefs.get(ref) ?? [],
-    ...realtimeRefs.get(`${ref}/${data.id}`) ?? [],
+    ...changes.flatMap((change) => [
+      ...(realtimeRefs.get(change.ref) ?? []),
+      ...(realtimeRefs.get(`${change.ref}/${change.data.id}`) ?? []),
+    ]),
   ]);
   const message = JSON.stringify({
     event: "sync",
     data: {
-      changes: [{ ref, type, data }],
+      changes,
     },
   });
   for (const clientId of targets) {
@@ -198,9 +207,7 @@ function publishRealtime(ref: string, type: "added" | "modified" | "removed", da
 
 function publishCollectionSnapshot(collection: "accounts" | "reports") {
   const docs = collection === "accounts" ? getAccounts().map((account) => serializeAccount(account)) : reports;
-  for (const doc of docs) {
-    publishRealtime(collection, "modified", doc);
-  }
+  publishRealtimeChanges(docs.map((doc) => ({ ref: collection, type: "modified", data: doc })));
 }
 
 export function addReport(entry: Omit<ReportDocument, "id"> & { id?: string }): ReportDocument {
@@ -213,7 +220,7 @@ export function addReport(entry: Omit<ReportDocument, "id"> & { id?: string }): 
   };
   reports.unshift(report);
   if (reports.length > REPORT_LIMIT) reports.length = REPORT_LIMIT;
-  publishRealtime("reports", "added", report);
+  publishRealtimeChanges([{ ref: "reports", type: "added", data: report }]);
   return report;
 }
 
@@ -357,14 +364,15 @@ async function handleAction(action: string, ctx: LivequeryContext, openaiBaseUrl
 
   if (action === "set-config") {
     const enabled = Boolean(payload.enabled);
+    const shouldRestartCodex = Boolean(payload.restartCodex);
     if (enabled) patchCodexConfig(openaiBaseUrl);
     else restoreCodexConfig();
     saveProxyState(enabled);
-    await restartCodex();
+    if (shouldRestartCodex) await restartCodex();
     const state = isCodexConfigPatched(openaiBaseUrl);
     logEvent("config_proxy", state ? "enabled" : "disabled");
-    addReport({ type: "config_proxy", enabled: state, timestamp: Date.now() });
-    return json({ data: { ok: true, enabled: state } });
+    addReport({ type: "config_proxy", enabled: state, restarted: shouldRestartCodex, timestamp: Date.now() });
+    return json({ data: { ok: true, enabled: state, restarted: shouldRestartCodex } });
   }
 
   return error("ACTION_NOT_FOUND", `Unknown LiveQuery action: ${action}`, 404);
@@ -411,6 +419,23 @@ export async function handleLivequeryRequest(
 export function closeLivequery() {
   realtimeClients.clear();
   realtimeRefs.clear();
+}
+
+export function getLivequeryHealth(openaiBaseUrl: string) {
+  const accounts = getAccounts();
+  return {
+    ok: true,
+    openaiBaseUrl,
+    accountCount: accounts.length,
+    activeAccountCount: accounts.filter((account) => account.status === "active").length,
+    selectedAccount: accounts.find((account) => account.selected)?.email ?? null,
+    configInstalled: isCodexConfigPatched(openaiBaseUrl),
+    realtimeClientCount: realtimeClients.size,
+    realtimeSubscriptionCount: Array.from(realtimeRefs.values()).reduce((sum, clients) => sum + clients.size, 0),
+    reportsCount: reports.length,
+    usageRefreshRunning: Boolean(accountsUsageRefresh),
+    timestamp: Date.now(),
+  };
 }
 
 export function openLivequerySocket(ws: {

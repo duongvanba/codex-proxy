@@ -1,12 +1,34 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
-import type { Account } from "./types";
+import type { Account, CodexUsage, UsageWindow } from "./types";
 
 const ACCOUNTS_FILE = join(import.meta.dir, "..", "accounts.json");
+const ACCOUNT_STATE_FILE = join(import.meta.dir, "..", "account-state.json");
 const DEFAULT_DAILY_LIMIT = readLimit("CODEX_DAILY_LIMIT", 100);
 const DEFAULT_WEEKLY_LIMIT = readLimit("CODEX_WEEKLY_LIMIT", 500);
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USAGE_TTL_MS = readLimit("CODEX_USAGE_TTL_SECONDS", 60) * 1000;
+const CODEX_USAGE_CONCURRENCY = readLimit("CODEX_USAGE_CONCURRENCY", 3);
+const CODEX_USAGE_TIMEOUT_MS = readLimit("CODEX_USAGE_TIMEOUT_MS", 3000);
+
+type PersistedAccount = Pick<
+  Account,
+  "id" | "email" | "accessToken" | "refreshToken" | "idToken" | "accountId" | "addedAt"
+> & Partial<Account>;
+
+type AccountRuntimeState = {
+  status?: Account["status"];
+  rateLimitUntil?: number;
+  requestCount?: number;
+  lastUsed?: number;
+  dailyUsage?: UsageWindow;
+  weeklyUsage?: UsageWindow;
+  codexUsage?: CodexUsage;
+  chatgptPlanType?: string;
+  selected?: boolean;
+};
+
+type AccountStateFile = Record<string, AccountRuntimeState>;
 
 function readLimit(envName: string, fallback: number): number {
   const raw = process.env[envName];
@@ -83,7 +105,22 @@ function loadAccounts(): Account[] {
   ensureProxyHome();
   if (!existsSync(ACCOUNTS_FILE)) return [];
   try {
-    return JSON.parse(readFileSync(ACCOUNTS_FILE, "utf8"));
+    const accounts = JSON.parse(readFileSync(ACCOUNTS_FILE, "utf8")) as PersistedAccount[];
+    const state = loadAccountState();
+    let migrated = false;
+    const merged = accounts.map((account) => {
+      const embeddedState = extractAccountState(account);
+      if (Object.keys(embeddedState).length > 0) migrated = true;
+      return {
+        status: "active",
+        requestCount: 0,
+        ...account,
+        ...embeddedState,
+        ...state[account.id],
+      } as Account;
+    });
+    if (migrated) saveAccounts(merged);
+    return merged;
   } catch {
     return [];
   }
@@ -91,7 +128,47 @@ function loadAccounts(): Account[] {
 
 function saveAccounts(accounts: Account[]) {
   ensureProxyHome();
-  writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2));
+  writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts.map(stripAccountState), null, 2));
+  saveAccountState(Object.fromEntries(accounts.map((account) => [account.id, extractAccountState(account)])));
+}
+
+function loadAccountState(): AccountStateFile {
+  if (!existsSync(ACCOUNT_STATE_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync(ACCOUNT_STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveAccountState(state: AccountStateFile) {
+  writeFileSync(ACCOUNT_STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+function stripAccountState(account: Account): PersistedAccount {
+  return {
+    id: account.id,
+    email: account.email,
+    accessToken: account.accessToken,
+    refreshToken: account.refreshToken,
+    idToken: account.idToken,
+    accountId: account.accountId,
+    addedAt: account.addedAt,
+  };
+}
+
+function extractAccountState(account: Partial<Account>): AccountRuntimeState {
+  const state: AccountRuntimeState = {};
+  if (account.status) state.status = account.status;
+  if (account.rateLimitUntil !== undefined) state.rateLimitUntil = account.rateLimitUntil;
+  if (account.requestCount !== undefined) state.requestCount = account.requestCount;
+  if (account.lastUsed !== undefined) state.lastUsed = account.lastUsed;
+  if (account.dailyUsage) state.dailyUsage = account.dailyUsage;
+  if (account.weeklyUsage) state.weeklyUsage = account.weeklyUsage;
+  if (account.codexUsage) state.codexUsage = account.codexUsage;
+  if (account.chatgptPlanType) state.chatgptPlanType = account.chatgptPlanType;
+  if (account.selected !== undefined) state.selected = account.selected;
+  return state;
 }
 
 export function getAccounts(): Account[] {
@@ -128,24 +205,31 @@ export async function refreshCodexUsageForAccounts(force = false): Promise<void>
   const now = Date.now();
   let changed = false;
 
-  for (const account of accounts) {
+  const pending = accounts.filter((account) => {
     if (!force && account.codexUsage?.fetchedAt && now - account.codexUsage.fetchedAt < CODEX_USAGE_TTL_MS) {
-      continue;
+      return false;
     }
+    return true;
+  });
 
+  async function refreshOne(account: Account) {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
       const res = await fetch(CODEX_USAGE_URL, {
-        headers: {
-          accept: "*/*",
-          authorization: `Bearer ${account.accessToken}`,
-          "cache-control": "no-cache",
-          pragma: "no-cache",
-          referer: "https://chatgpt.com/codex/cloud/settings/analytics",
-          "x-openai-target-path": "/backend-api/wham/usage",
-          "x-openai-target-route": "/backend-api/wham/usage",
-          "user-agent": "Mozilla/5.0",
-        },
-      });
+          signal: controller.signal,
+          headers: {
+            accept: "*/*",
+            authorization: `Bearer ${account.accessToken}`,
+            "cache-control": "no-cache",
+            pragma: "no-cache",
+            referer: "https://chatgpt.com/codex/cloud/settings/analytics",
+            "x-openai-target-path": "/backend-api/wham/usage",
+            "x-openai-target-route": "/backend-api/wham/usage",
+            "user-agent": "Mozilla/5.0",
+          },
+        })
+        .finally(() => clearTimeout(timeout));
       const text = await res.text();
 
       if (!res.ok) {
@@ -157,7 +241,7 @@ export async function refreshCodexUsageForAccounts(force = false): Promise<void>
         };
         if (res.status === 401) account.status = "expired";
         changed = true;
-        continue;
+        return;
       }
 
       const body = JSON.parse(text);
@@ -181,6 +265,10 @@ export async function refreshCodexUsageForAccounts(force = false): Promise<void>
       };
       changed = true;
     }
+  }
+
+  for (let i = 0; i < pending.length; i += CODEX_USAGE_CONCURRENCY) {
+    await Promise.all(pending.slice(i, i + CODEX_USAGE_CONCURRENCY).map(refreshOne));
   }
 
   if (changed) saveAccounts(accounts);

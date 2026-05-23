@@ -12,6 +12,7 @@ import {
   closeLivequerySocket,
   closeLivequery,
   getLivequeryRealtimeUrl,
+  getLivequeryHealth,
   handleLivequeryRequest,
   messageLivequerySocket,
   notifyAccountsChanged,
@@ -137,6 +138,10 @@ Bun.serve<WsData>({
 
     if (path === "/favicon.ico") {
       return new Response(null, { status: 204 });
+    }
+
+    if (path === "/health" && req.method === "GET") {
+      return Response.json(getLivequeryHealth(OPENAI_BASE_URL));
     }
 
     if (

@@ -61,8 +61,9 @@ PROXY_TLS=1 bun run index.ts
 
 Use the Web UI `Install` and `Uninstall` buttons to write or remove
 `openai_base_url` in `~/.codex/config.toml`. Installing patches Codex to use
-this proxy and restarts Codex. Uninstalling removes that config and restarts
-Codex. The server does not auto-patch the Codex config on startup.
+this proxy. Uninstalling removes that config. The UI asks whether Codex should
+be restarted after either operation; restart is no longer forced by default.
+The server does not auto-patch the Codex config on startup.
 
 The Web UI uses `@livequery/client`, `@livequery/react`, and `@livequery/rest`
 against backend handlers built with `@livequery/core`.
@@ -77,6 +78,13 @@ The `accounts` collection returns local account data immediately. Quota reset
 timers are returned as `-1` until the background OpenAI quota refresh finishes.
 The UI shows skeleton rows for those pending timers, then updates via
 `/livequery/realtime-updates` when the backend emits refreshed account data.
+Account updates are batched into a single realtime sync event where possible.
+
+Account tokens and runtime state are persisted separately:
+
+- `accounts.json`: OAuth tokens and stable account identity fields.
+- `account-state.json`: selected account, status, request counts, usage cache,
+  and other runtime metadata.
 
 Usage bars in the Web UI refresh from ChatGPT's Codex usage endpoint when the
 account token is valid. If usage fetch fails or no remote data is available, the
@@ -93,9 +101,40 @@ Remote usage refresh is cached for 60 seconds by default:
 CODEX_USAGE_TTL_SECONDS=120 bun run index.ts
 ```
 
+Remote usage refresh is parallelized with a small concurrency limit and per
+request timeout:
+
+```bash
+CODEX_USAGE_CONCURRENCY=3 CODEX_USAGE_TIMEOUT_MS=3000 bun run index.ts
+```
+
+Health checks:
+
+```bash
+curl http://localhost:17000/health
+```
+
+Tests:
+
+```bash
+bun test
+```
+
 This project was created using `bun init` in bun v1.3.12. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
 
 The Web UI includes a `Login` button. It starts an OAuth flow, opens a
 temporary callback server on `http://localhost:1455/auth/callback`, imports the
 returned tokens into `accounts.json`, then closes the callback port. The
 callback server auto-closes after 5 minutes if login is not completed.
+
+## Troubleshooting
+
+- Port is busy: set `PROXY_PORT` to another port or stop the old process.
+- LAN access does not work: run with `PROXY_HOST=0.0.0.0` and check macOS
+  firewall settings.
+- Codex still uses the old endpoint: click `Install`, confirm the target URL in
+  `~/.codex/config.toml`, then restart Codex if needed.
+- Quota rows show skeletons: the local account list has loaded, but background
+  OpenAI quota refresh is still running or timed out.
+- Token expired: log in again from the Web UI, or let the watcher import a fresh
+  token from `~/.codex/auth.json`.
