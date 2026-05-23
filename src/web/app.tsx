@@ -148,6 +148,9 @@ function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: bo
   const accountAction = useAction(async (action: string, payload?: Record<string, unknown>) => {
     return await accountsCollection.trigger(action, payload);
   });
+  const switchDisabled = accountAction.loading ||
+    account.status !== "active" ||
+    Boolean(account.codexUsage?.error || account.codexUsage?.limitReached);
 
   async function selectAccount() {
     await accountAction("select-account", { id: account.id });
@@ -166,7 +169,7 @@ function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: bo
         {isUsing ? (
           <span className="running" />
         ) : (
-          <button disabled={accountAction.loading} onClick={() => void selectAccount()}>
+          <button disabled={switchDisabled} title={switchDisabled ? "This account is not currently usable" : undefined} onClick={() => void selectAccount()}>
             {accountAction.loading ? <span className="inline-spinner compact" /> : null}
             Switch
           </button>
