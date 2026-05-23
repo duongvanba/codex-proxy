@@ -250,7 +250,7 @@ export function getSwitchCandidates(excludeAccountId?: string): Account[] {
 export function setSelectedAccount(accountId: string): { ok: boolean; error?: string } {
   const accounts = loadAccounts();
   const target = accounts.find((a) => a.id === accountId);
-  if (!target) return { ok: false, error: "Account không tồn tại" };
+  if (!target) return { ok: false, error: "Account does not exist" };
 
   for (const a of accounts) {
     a.selected = a.id === accountId;
@@ -298,9 +298,9 @@ export function recordRequest(accountId: string) {
 export function removeAccount(accountId: string): { ok: boolean; error?: string } {
   const accounts = loadAccounts();
   const account = accounts.find((a) => a.id === accountId);
-  if (!account) return { ok: false, error: "Account không tồn tại" };
+  if (!account) return { ok: false, error: "Account does not exist" };
   if (account.selected && account.status === "active") {
-    return { ok: false, error: "Không thể xóa tài khoản đang active" };
+    return { ok: false, error: "Cannot remove the active account" };
   }
   const nextAccounts = accounts.filter((a) => a.id !== accountId);
   saveAccounts(nextAccounts);

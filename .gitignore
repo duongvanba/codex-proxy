@@ -4,6 +4,7 @@ node_modules
 # output
 out
 dist
+.livequery-web/
 *.tgz
 
 # code coverage

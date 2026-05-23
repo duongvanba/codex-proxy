@@ -674,7 +674,7 @@ async function proxyRequestInner(
         { status: 429, headers: { "Content-Type": "application/json" } }
       );
     }
-    responseBody = preflight.body;
+    responseBody = preflight.body as typeof responseBody;
   }
 
   const bodyWithErrorTap = streamWithErrorTap(
@@ -708,6 +708,7 @@ export function buildWebSocketProxyData(req: Request): {
   upstreamUrl: string;
   headers: Record<string, string>;
   email: string;
+  accountId: string;
 } | null {
   const account = getActiveAccount();
   if (!account) return null;
@@ -743,5 +744,6 @@ export function buildWebSocketProxyData(req: Request): {
     upstreamUrl,
     headers: Object.fromEntries(headers.entries()),
     email: account.email,
+    accountId: account.id,
   };
 }

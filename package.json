@@ -8,9 +8,19 @@
     "dev": "bun --watch run index.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@livequery/client": "^2.0.136",
+    "@livequery/core": "^2.0.106",
+    "@livequery/react": "^2.0.136",
+    "@livequery/rest": "^2.0.136",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
   }
 }

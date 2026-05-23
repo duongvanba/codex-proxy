@@ -108,7 +108,7 @@ async function exchangeCodeForAccount(
     });
 
     if (!tokenResp.ok) {
-      const error = `Token exchange thất bại (${tokenResp.status}): ${body}`;
+      const error = `Token exchange failed (${tokenResp.status}): ${body}`;
       onError(error);
       stopServer();
       return { ok: false, error };
@@ -119,7 +119,7 @@ async function exchangeCodeForAccount(
     setTimeout(stopServer, 500);
 
     if (!account) {
-      const error = "Không parse được account từ token.";
+      const error = "Could not parse account from token.";
       logEvent("login_import_error", error);
       onEvent?.({ type: "login_import_error", error });
       return { ok: false, error };
@@ -143,19 +143,19 @@ export async function importCallbackUrl(callbackUrl: string): Promise<{
   error?: string;
 }> {
   if (!activeLogin) {
-    return { ok: false, error: "Chưa có login flow đang chạy. Bấm Login trước rồi paste callback URL." };
+    return { ok: false, error: "No login flow is running. Click Login first, then paste the callback URL." };
   }
 
   let url: URL;
   try {
     url = new URL(callbackUrl);
   } catch {
-    return { ok: false, error: "Callback URL không hợp lệ" };
+    return { ok: false, error: "Invalid callback URL" };
   }
 
   const returnedState = url.searchParams.get("state");
   if (returnedState !== activeLogin.state) {
-    return { ok: false, error: "State không khớp với login flow hiện tại" };
+    return { ok: false, error: "State does not match the current login flow" };
   }
 
   const error = url.searchParams.get("error");
@@ -164,13 +164,13 @@ export async function importCallbackUrl(callbackUrl: string): Promise<{
     const message = `error=${error}${errorDescription ? ` desc=${errorDescription}` : ""}`;
     logEvent("login_callback", message);
     activeLogin.onEvent?.({ type: "login_callback", error, message });
-    activeLogin.onError(`Login thất bại: ${error}`);
+    activeLogin.onError(`Login failed: ${error}`);
     stopServer();
-    return { ok: false, error: `Login thất bại: ${error}` };
+    return { ok: false, error: `Login failed: ${error}` };
   }
 
   const code = url.searchParams.get("code");
-  if (!code) return { ok: false, error: "Callback URL không có OAuth code" };
+  if (!code) return { ok: false, error: "Callback URL does not include an OAuth code" };
 
   return exchangeCodeForAccount(
     code,
@@ -187,7 +187,7 @@ export function startLoginFlow(
   onEvent?: (event: LoginEvent) => void
 ): LoginStartResult {
   if (activeServer) {
-    return { ok: false, error: "Login đang tiến hành, vui lòng đợi." };
+    return { ok: false, error: "Login is already in progress. Please wait." };
   }
 
   const { verifier, challenge } = generatePKCE();
@@ -222,11 +222,11 @@ export function startLoginFlow(
         const returnedState = url.searchParams.get("state");
 
         if (returnedState !== state) {
-          const error = "State không khớp";
+          const error = "State does not match";
           logEvent("login_callback", error);
           onEvent?.({ type: "login_callback", error });
           stopServer();
-          return html("Lỗi bảo mật", "<p>State không khớp. Vui lòng thử lại.</p>", 400);
+          return html("Security error", "<p>State does not match. Please try again.</p>", 400);
         }
 
         if (!code) {
@@ -235,29 +235,29 @@ export function startLoginFlow(
           const message = `error=${error}${errorDescription ? ` desc=${errorDescription}` : ""}`;
           logEvent("login_callback", message);
           onEvent?.({ type: "login_callback", error, message });
-          onError(`Login thất bại: ${error}`);
+          onError(`Login failed: ${error}`);
           stopServer();
-          return html("Login thất bại", `<p>${error}</p>`, 400);
+          return html("Login failed", `<p>${error}</p>`, 400);
         }
 
         try {
           const result = await exchangeCodeForAccount(code, verifier, onAccount, onError, onEvent);
           if (result.ok) {
             return html(
-              "Login thành công",
-              `<h2>✓ Login thành công!</h2><p>Tài khoản <strong>${result.email}</strong> đã được lưu.<br>Tab này sẽ tự đóng.</p><script>setTimeout(()=>window.close(),2000)</script>`,
+              "Login successful",
+              `<h2>Login successful</h2><p>Account <strong>${result.email}</strong> has been saved.<br>This tab will close automatically.</p><script>setTimeout(()=>window.close(),2000)</script>`,
               200
             );
           }
 
-          return html("Login thất bại", `<pre>${result.error ?? "unknown"}</pre>`, 500);
+          return html("Login failed", `<pre>${result.error ?? "unknown"}</pre>`, 500);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           logEvent("login_exception", msg);
           onEvent?.({ type: "login_exception", error: msg });
           onError(msg);
           stopServer();
-          return html("Lỗi", `<pre>${msg}</pre>`, 500);
+          return html("Error", `<pre>${msg}</pre>`, 500);
         }
       },
     });
@@ -268,19 +268,19 @@ export function startLoginFlow(
     return { ok: false, error: msg };
   }
 
-  // Tự đóng sau 5 phút nếu không có callback
+  // Close automatically after 5 minutes if no callback arrives.
   timeoutHandle = setTimeout(() => {
-    console.log("[login] Timeout 5 phút — tự đóng port 1455");
+    console.log("[login] 5-minute timeout — closing port 1455");
     stopServer();
-    logEvent("login_timeout", "Hết thời gian chờ login (5 phút).");
-    onEvent?.({ type: "login_timeout", error: "Hết thời gian chờ login (5 phút)." });
-    onError("Hết thời gian chờ login (5 phút).");
+    logEvent("login_timeout", "Login timed out after 5 minutes.");
+    onEvent?.({ type: "login_timeout", error: "Login timed out after 5 minutes." });
+    onError("Login timed out after 5 minutes.");
   }, LOGIN_TIMEOUT_MS);
 
   console.log(`[login] Callback server started on http://localhost:${CALLBACK_PORT}`);
 
   Bun.$`open ${authorizeUrl}`.catch(() => {
-    console.log(`[login] Không mở được browser. URL: ${authorizeUrl}`);
+    console.log(`[login] Could not open browser. URL: ${authorizeUrl}`);
   });
 
   return { ok: true, authorizeUrl };

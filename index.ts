@@ -1,19 +1,26 @@
 import { proxyRequest, buildWebSocketProxyData } from "./src/proxy";
 import {
-  getAccounts,
-  removeAccount,
-  refreshCodexUsageForAccounts,
-  setSelectedAccount,
+  recordRequest,
 } from "./src/accounts";
-import { isCodexConfigPatched, patchCodexConfig, restoreCodexConfig, saveProxyState, loadProxyState } from "./src/config-patcher";
+import { patchCodexConfig, restoreCodexConfig, loadProxyState } from "./src/config-patcher";
 import { getUnsupportedRoutesLogPath, proxyUnsupportedRoute } from "./src/unsupported-routes";
 import { watchCodexAuth } from "./src/watcher";
-import { cancelLoginFlow, importCallbackUrl, isLoginInProgress, startLoginFlow } from "./src/login-flow";
 import { logRequest, logEvent } from "./src/logger";
+import {
+  LIVEQUERY_SOCKET_PATH,
+  addReport,
+  closeLivequerySocket,
+  closeLivequery,
+  getLivequeryRealtimeUrl,
+  handleLivequeryRequest,
+  messageLivequerySocket,
+  notifyAccountsChanged,
+  openLivequerySocket,
+} from "./src/livequery";
 import { join } from "path";
 import { existsSync } from "fs";
 
-const PORT = parseInt(process.env.PROXY_PORT ?? "9876");
+const PORT = parseInt(process.env.PROXY_PORT ?? "9878");
 const CERTS_DIR = join(import.meta.dir, "certs");
 const TLS_CERT = join(CERTS_DIR, "localhost.crt");
 const TLS_KEY = join(CERTS_DIR, "localhost.key");
@@ -21,18 +28,25 @@ const USE_TLS = process.env.PROXY_TLS === "1" && existsSync(TLS_CERT) && existsS
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? `http://localhost:${PORT}`).replace(/\/+$/, "");
 const OPENAI_BASE_URL = `${PUBLIC_BASE_URL}/v1`;
 const WEB_DIR = join(import.meta.dir, "src/web");
+const WEB_BUILD_DIR = join(import.meta.dir, ".livequery-web");
+const WEB_BUNDLE = join(WEB_BUILD_DIR, "app.js");
 
 // ─── WebSocket proxy data ─────────────────────────────────────────────────────
 interface WsData {
-  upstreamUrl: string;
-  headers: Record<string, string>;
-  email: string;
+  kind?: "codex" | "livequery";
+  upstreamUrl?: string;
+  headers?: Record<string, string>;
+  email?: string;
+  accountId?: string;
   upstream?: WebSocket;
+  livequeryClientId?: string;
+  livequeryRefs?: Set<string>;
 }
 
 // ─── SSE log broadcast ────────────────────────────────────────────────────────
 const logClients = new Set<(data: string) => void>();
 function broadcastLog(entry: object) {
+  addReport(entry as any);
   const data = `data: ${JSON.stringify(entry)}\n\n`;
   for (const send of logClients) send(data);
 }
@@ -47,9 +61,17 @@ async function restartCodex() {
 logEvent("startup", `proxy port=${PORT} tls=${USE_TLS}`);
 
 if (loadProxyState()) {
-  patchCodexConfig(OPENAI_BASE_URL);
-  console.log("[server] Auto-restored proxy config from saved state");
+  console.log("[server] Saved proxy state is enabled; not auto-patching config on startup");
 }
+
+await Bun.build({
+  entrypoints: [join(WEB_DIR, "app.tsx")],
+  outdir: WEB_BUILD_DIR,
+  target: "browser",
+  format: "esm",
+  minify: false,
+  sourcemap: "external",
+});
 
 // ─── Watch ~/.codex/auth.json — auto-import whenever Codex writes new tokens ─
 watchCodexAuth(({ email, isNew }) => {
@@ -57,14 +79,14 @@ watchCodexAuth(({ email, isNew }) => {
   console.log(`[server] auth.json → ${isNew ? "NEW account" : "token refresh"}: ${email}`);
   logEvent(evtType, email);
   broadcastLog({ type: evtType, email, timestamp: Date.now() });
+  notifyAccountsChanged();
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 async function shutdown(signal: string) {
   console.log("\n[server] Shutting down...");
   logEvent("shutdown", signal);
-  const changed = restoreCodexConfig();
-  if (changed) await restartCodex();
+  closeLivequery();
   process.exit(0);
 }
 process.on("SIGINT", () => { shutdown("SIGINT"); });
@@ -73,6 +95,7 @@ process.on("SIGTERM", () => { shutdown("SIGTERM"); });
 // ─── HTTP Server ──────────────────────────────────────────────────────────────
 Bun.serve<WsData>({
   port: PORT,
+  hostname: process.env.PROXY_HOST ?? "0.0.0.0",
   idleTimeout: 120,
   ...(USE_TLS && {
     tls: {
@@ -87,13 +110,50 @@ Bun.serve<WsData>({
 
     // ── Web UI ────────────────────────────────────────────────────────────────
     if (path === "/" || path === "/index.html") {
-      return new Response(Bun.file(join(WEB_DIR, "index.html")), {
+      const realtimeUrl = getLivequeryRealtimeUrl(url.origin);
+      const html = await Bun.file(join(WEB_DIR, "index.html")).text();
+      return new Response(html.replace("__LIVEQUERY_WS_URL_VALUE__", realtimeUrl), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    if (path === "/app.js") {
+      return new Response(Bun.file(WEB_BUNDLE), {
+        headers: { "Content-Type": "text/javascript; charset=utf-8" },
+      });
+    }
+
+    if (path === "/app.js.map") {
+      return new Response(Bun.file(`${WEB_BUNDLE}.map`), {
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+
+    if (path === "/app.css") {
+      return new Response(Bun.file(join(WEB_BUILD_DIR, "app.css")), {
+        headers: { "Content-Type": "text/css; charset=utf-8" },
       });
     }
 
     if (path === "/favicon.ico") {
       return new Response(null, { status: 204 });
+    }
+
+    if (
+      path === LIVEQUERY_SOCKET_PATH &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket"
+    ) {
+      const upgraded = server.upgrade(req, { data: { kind: "livequery" } });
+      if (upgraded) return;
+      return new Response("LiveQuery WebSocket upgrade failed", { status: 400 });
+    }
+
+    if (path.startsWith("/livequery/")) {
+      return handleLivequeryRequest(req, {
+        openaiBaseUrl: OPENAI_BASE_URL,
+        publicBaseUrl: PUBLIC_BASE_URL,
+        restartCodex,
+      });
     }
 
     // ── Stub /v1/models — ChatGPT OAuth tokens lack api.model.read scope ─────
@@ -104,157 +164,16 @@ Bun.serve<WsData>({
       return Response.json({ object: "list", data: models });
     }
 
-    // ── API: list accounts ────────────────────────────────────────────────────
-    if (path === "/api/accounts" && req.method === "GET") {
-      await refreshCodexUsageForAccounts();
-      return Response.json(getAccounts());
-    }
-
-    // ── API: force refresh Codex usage ────────────────────────────────────────
-    if (path === "/api/usage/refresh" && req.method === "POST") {
-      await refreshCodexUsageForAccounts(true);
-      return Response.json({ ok: true, accounts: getAccounts() });
-    }
-
-    // ── API: start OAuth login flow on callback port 1455 ────────────────────
-    if (path === "/api/login" && req.method === "POST") {
-      const sendLoginEvent = (entry: object) => {
-        broadcastLog({ ...entry, timestamp: Date.now() });
-      };
-      const result = startLoginFlow(
-        (email) => {
-          logEvent("login_success", email);
-          broadcastLog({ type: "login_success", email, timestamp: Date.now() });
-        },
-        (error) => {
-          logEvent("login_error", error);
-          broadcastLog({ type: "login_error", error, timestamp: Date.now() });
-        },
-        sendLoginEvent
-      );
-      if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
-      logEvent("login_started", "callback port=1455");
-      broadcastLog({ type: "login_started", timestamp: Date.now() });
-      return Response.json({ ok: true, authorizeUrl: result.authorizeUrl });
-    }
-
-    // ── API: login status ────────────────────────────────────────────────────
-    if (path === "/api/login/status" && req.method === "GET") {
-      return Response.json({ inProgress: isLoginInProgress() });
-    }
-
-    // ── API: cancel OAuth login flow and close callback port 1455 ────────────
-    if (path === "/api/login/cancel" && req.method === "POST") {
-      const cancelled = cancelLoginFlow("cancelled from Web UI");
-      if (cancelled) {
-        broadcastLog({ type: "login_cancelled", timestamp: Date.now() });
-      }
-      return Response.json({ ok: true, cancelled, inProgress: isLoginInProgress() });
-    }
-
-    // ── API: import pasted OAuth callback URL into the active login flow ─────
-    if (path === "/api/login/import-callback" && req.method === "POST") {
-      let callbackUrl = "";
-      try {
-        const body = await req.json() as { callbackUrl?: unknown };
-        callbackUrl = typeof body.callbackUrl === "string" ? body.callbackUrl.trim() : "";
-      } catch {
-        return Response.json({ error: "Invalid JSON body" }, { status: 400 });
-      }
-      if (!callbackUrl) return Response.json({ error: "Missing callbackUrl" }, { status: 400 });
-
-      const result = await importCallbackUrl(callbackUrl);
-      if (!result.ok) {
-        const error = result.error ?? "Import callback failed";
-        logEvent("login_import_error", error);
-        broadcastLog({ type: "login_import_error", error, timestamp: Date.now() });
-        return Response.json({ error }, { status: 400 });
-      }
-
-      return Response.json({ ok: true, email: result.email, accounts: getAccounts() });
-    }
-
-    // ── API: Codex config proxy switch status ────────────────────────────────
-    if (path === "/api/config/status" && req.method === "GET") {
-      return Response.json({ enabled: isCodexConfigPatched(OPENAI_BASE_URL) });
-    }
-
-    // ── API: enable/disable Codex config proxy and restart Codex ─────────────
-    if (path === "/api/config" && req.method === "POST") {
-      let enabled = false;
-      try {
-        const body = await req.json() as { enabled?: unknown };
-        enabled = Boolean(body?.enabled);
-      } catch {
-        return Response.json({ error: "Invalid JSON body" }, { status: 400 });
-      }
-      const caller = req.headers.get("user-agent") ?? "unknown";
-      const origin = req.headers.get("origin") ?? req.headers.get("referer") ?? "unknown";
-      console.log(`[config] POST /api/config enabled=${enabled} caller="${caller}" origin="${origin}"`);
-
-      if (enabled) {
-        patchCodexConfig(OPENAI_BASE_URL);
-      } else {
-        restoreCodexConfig();
-      }
-      saveProxyState(enabled);
-      await restartCodex();
-
-      const state = isCodexConfigPatched(OPENAI_BASE_URL);
-      logEvent("config_proxy", state ? "enabled" : "disabled");
-      broadcastLog({ type: "config_proxy", enabled: state, timestamp: Date.now() });
-      return Response.json({ ok: true, enabled: state });
-    }
-
-    // ── API: switch active account ────────────────────────────────────────────
-    if (path.startsWith("/api/accounts/") && path.endsWith("/select") && req.method === "POST") {
-      const id = path.split("/")[3];
-      if (!id) return Response.json({ error: "Missing account id" }, { status: 400 });
-      const result = setSelectedAccount(id);
-      if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
-      const account = getAccounts().find((a) => a.id === id);
-      const email = account?.email ?? id;
-      logEvent("account_selected", email);
-      broadcastLog({ type: "account_selected", email, timestamp: Date.now() });
-      return Response.json({ ok: true });
-    }
-
-    // ── API: delete account ───────────────────────────────────────────────────
-    if (path.startsWith("/api/accounts/") && req.method === "DELETE") {
-      const id = path.split("/")[3];
-      if (!id) return Response.json({ error: "Missing account id" }, { status: 400 });
-      const result = removeAccount(id);
-      if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
-      logEvent("account_removed", id);
-      return Response.json({ ok: true });
-    }
-
-    // ── API: SSE real-time log stream ─────────────────────────────────────────
-    if (path === "/api/logs/stream") {
-      let send: (data: string) => void;
-      const stream = new ReadableStream({
-        start(controller) {
-          send = (data) => controller.enqueue(new TextEncoder().encode(data));
-          logClients.add(send);
-          send(`data: ${JSON.stringify({ type: "logs_connected", timestamp: Date.now() })}\n\n`);
-        },
-        cancel() {
-          logClients.delete(send);
-        },
-      });
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
-    }
-
-    // ── Unknown local API routes must not be proxied to ChatGPT ──────────────
     if (path.startsWith("/api/")) {
-      return Response.json({ error: `Unknown API route: ${path}` }, { status: 404 });
+      return Response.json(
+        {
+          error: {
+            message: `Legacy API route removed after LiveQuery migration: ${path}`,
+            type: "livequery_migration",
+          },
+        },
+        { status: 410 }
+      );
     }
 
     // ── WebSocket proxy (Codex uses /v1/responses as WebSocket) ──────────────
@@ -269,7 +188,7 @@ Bun.serve<WsData>({
           { status: 503 }
         );
       }
-      const upgraded = server.upgrade(req, { data: wsData });
+      const upgraded = server.upgrade(req, { data: { ...wsData, kind: "codex" } });
       if (upgraded) return;
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
@@ -311,6 +230,7 @@ Bun.serve<WsData>({
         (accountSwitch) => {
           logEvent("account_switched", `${accountSwitch.from} → ${accountSwitch.to} [${accountSwitch.reason}]`);
           broadcastLog({ type: "account_switched", ...accountSwitch, timestamp: Date.now() });
+          notifyAccountsChanged();
         }
       );
       const latencyMs = Date.now() - start;
@@ -343,6 +263,7 @@ Bun.serve<WsData>({
         const sw = meta.accountSwitched;
         logEvent("account_switched", `${sw.from} → ${sw.to} [${sw.reason}]`);
         broadcastLog({ type: "account_switched", ...sw, timestamp: Date.now() });
+        notifyAccountsChanged();
       }
 
       return response;
@@ -387,25 +308,50 @@ Bun.serve<WsData>({
 
   websocket: {
     open(ws) {
+      if (ws.data.kind === "livequery") {
+        openLivequerySocket(ws as any);
+        return;
+      }
       console.log(`[ws] client connected [${ws.data.email}]`);
       // Upstream is connected lazily on first message to avoid chatgpt.com's
       // tight first-message timeout closing the connection before Codex sends.
     },
     message(ws, message) {
-      const snippet = typeof message === "string" ? message.slice(0, 200) : `[binary ${(message as ArrayBuffer).byteLength}b]`;
+      if (ws.data.kind === "livequery") {
+        messageLivequerySocket(ws as any, message as any);
+        return;
+      }
+      const snippet = typeof message === "string" ? message.slice(0, 200) : `[binary ${message.byteLength}b]`;
       console.log(`[ws→up] [${ws.data.email}] ${snippet}`);
 
       if (!ws.data.upstream) {
+        // Determine if this is a NEW prompt vs a tool-call continuation.
+        // Continuations have previous_response_id set OR input contains tool outputs.
+        let isNewPrompt = true;
+        if (typeof message === "string") {
+          try {
+            const data = JSON.parse(message);
+            if (data?.previous_response_id) isNewPrompt = false;
+            else if (Array.isArray(data?.input)) {
+              const hasToolOutput = data.input.some((i: any) =>
+                i?.type === "function_call_output" || i?.type === "computer_call_output"
+              );
+              if (hasToolOutput) isNewPrompt = false;
+            }
+          } catch {}
+        }
+
         // First message: open upstream now and send immediately on open
-        const upstream = new WebSocket(ws.data.upstreamUrl, {
+        const upstream = new WebSocket(ws.data.upstreamUrl!, {
           // @ts-ignore — Bun extension: headers supported in WebSocket constructor
-          headers: ws.data.headers,
+          headers: ws.data.headers!,
         });
         ws.data.upstream = upstream;
         const wsStart = Date.now();
 
         upstream.addEventListener("open", () => {
-          console.log(`[ws] upstream open [${ws.data.email}]`);
+          console.log(`[ws] upstream open [${ws.data.email}] new_prompt=${isNewPrompt}`);
+          if (isNewPrompt && ws.data.accountId) recordRequest(ws.data.accountId);
           broadcastLog({ type: "ws_open", email: ws.data.email, timestamp: Date.now() });
           try { upstream.send(message); } catch {}
         });
@@ -436,6 +382,10 @@ Bun.serve<WsData>({
       }
     },
     close(ws, code, reason) {
+      if (ws.data.kind === "livequery") {
+        closeLivequerySocket(ws as any);
+        return;
+      }
       console.log(`[ws] client disconnected: ${code} ${reason ?? ""} [${ws.data.email}]`);
       try { ws.data.upstream?.close(); } catch {}
     },
@@ -448,7 +398,8 @@ console.log(`
 ║         Codex Proxy Manager              ║
 ╠══════════════════════════════════════════╣
 ║  Proxy : ${OPENAI_BASE_URL}     ║
-║  Web UI: ${scheme}://localhost:${PORT}        ║
+║  Web UI: ${scheme}://0.0.0.0:${PORT}          ║
+║  LQ WS : ${LIVEQUERY_SOCKET_PATH}             ║
 ║  Log   : logs/requests.log               ║
 ║  TLS   : ${USE_TLS ? "✓ enabled (certs/localhost.crt)" : "✗ disabled (HTTP only)"}  ║
 ╚══════════════════════════════════════════╝

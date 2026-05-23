@@ -6,28 +6,51 @@ To install dependencies:
 bun install
 ```
 
-To run:
+To run on the default development port:
 
 ```bash
 bun run index.ts
 ```
 
-The proxy serves HTTP by default, even if local certificate files exist:
+The dev branch serves HTTP on `9878` by default so it can run beside an
+existing proxy instance:
 
 ```bash
-http://localhost:9876
+http://localhost:9878
 ```
 
-Codex config is patched to use the public tunnel endpoint by default:
+For LAN testing, run the Bun server on one shared port and bind to all network
+interfaces:
 
 ```bash
-https://opaip.amazingproxy.xyz/v1
+PROXY_PORT=17000 PROXY_HOST=0.0.0.0 PUBLIC_BASE_URL=http://localhost:17000 bun run index.ts
+```
+
+Then open:
+
+```bash
+http://localhost:17000
+http://<your-lan-ip>:17000
+```
+
+The same Bun server port serves:
+
+- Frontend HTML/CSS/JS: `/`, `/app.js`, `/app.css`
+- LiveQuery REST collections and actions: `/livequery/*`
+- LiveQuery realtime WebSocket: `/livequery/realtime-updates`
+- Codex/OpenAI proxy traffic: `/v1/*` and `/backend-api/*`
+
+Codex config is patched to use the active proxy endpoint when the Web UI
+`Install` button is clicked:
+
+```bash
+http://localhost:9878/v1
 ```
 
 Override it with:
 
 ```bash
-PUBLIC_BASE_URL=https://your-domain.example bun run index.ts
+PROXY_PORT=9888 PUBLIC_BASE_URL=http://localhost:9888 bun run index.ts
 ```
 
 To enable the bundled local TLS certificate explicitly:
@@ -36,9 +59,24 @@ To enable the bundled local TLS certificate explicitly:
 PROXY_TLS=1 bun run index.ts
 ```
 
-Use the Web UI proxy switch to write or remove `openai_base_url` in
-`~/.codex/config.toml`. Turning the switch on patches Codex to use this proxy
-and restarts Codex. Turning it off removes that config and restarts Codex.
+Use the Web UI `Install` and `Uninstall` buttons to write or remove
+`openai_base_url` in `~/.codex/config.toml`. Installing patches Codex to use
+this proxy and restarts Codex. Uninstalling removes that config and restarts
+Codex. The server does not auto-patch the Codex config on startup.
+
+The Web UI uses `@livequery/client`, `@livequery/react`, and `@livequery/rest`
+against backend handlers built with `@livequery/core`.
+
+Collections:
+
+- `accounts`: account list, selected account, status, and usage metadata.
+- `reports`: realtime request, login, config, token usage, and account switch
+  reports.
+
+The `accounts` collection returns local account data immediately. Quota reset
+timers are returned as `-1` until the background OpenAI quota refresh finishes.
+The UI shows skeleton rows for those pending timers, then updates via
+`/livequery/realtime-updates` when the backend emits refreshed account data.
 
 Usage bars in the Web UI refresh from ChatGPT's Codex usage endpoint when the
 account token is valid. If usage fetch fails or no remote data is available, the
