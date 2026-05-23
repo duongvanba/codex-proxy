@@ -114,6 +114,24 @@ Health checks:
 curl http://localhost:17000/health
 ```
 
+Daily routine warm-up:
+
+The Bun server schedules a daily routine-limit warm-up for every account at
+7:00 AM in `Asia/Ho_Chi_Minh`. Each run sends the lightest Codex warm-up
+message per account and publishes per-account results to the `reports`
+collection. Tokens are not logged.
+
+Configuration:
+
+```bash
+DAILY_ROUTINE_TIME_ZONE=Asia/Ho_Chi_Minh
+DAILY_ROUTINE_HOUR=7
+DAILY_ROUTINE_MINUTE=0
+DAILY_ROUTINE_CONCURRENCY=2
+DAILY_ROUTINE_TIMEOUT_MS=15000
+DAILY_ROUTINE_DISABLED=1
+```
+
 Tests:
 
 ```bash

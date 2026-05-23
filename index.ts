@@ -18,6 +18,7 @@ import {
   notifyAccountsChanged,
   openLivequerySocket,
 } from "./src/livequery";
+import { startDailyRoutineScheduler } from "./src/daily-routine";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -65,6 +66,11 @@ if (loadProxyState()) {
   console.log("[server] Saved proxy state is enabled; not auto-patching config on startup");
 }
 
+const dailyRoutineScheduler = startDailyRoutineScheduler((entry) => {
+  addReport(entry as any);
+  notifyAccountsChanged();
+});
+
 await Bun.build({
   entrypoints: [join(WEB_DIR, "app.tsx")],
   outdir: WEB_BUILD_DIR,
@@ -87,6 +93,7 @@ watchCodexAuth(({ email, isNew }) => {
 async function shutdown(signal: string) {
   console.log("\n[server] Shutting down...");
   logEvent("shutdown", signal);
+  dailyRoutineScheduler.stop();
   closeLivequery();
   process.exit(0);
 }

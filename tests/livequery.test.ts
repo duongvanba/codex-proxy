@@ -4,6 +4,7 @@ import {
   getLivequeryHealth,
   serializeAccount,
 } from "../src/livequery";
+import { nextDailyRoutineRunAt } from "../src/daily-routine";
 import type { Account } from "../src/types";
 
 function account(overrides: Partial<Account> = {}): Account {
@@ -74,5 +75,13 @@ describe("LiveQuery helpers", () => {
     expect(health.openaiBaseUrl).toBe("http://localhost:17000/v1");
     expect(typeof health.accountCount).toBe("number");
     expect("accessToken" in health).toBe(false);
+  });
+
+  test("daily routine scheduler chooses the next 7am Ho Chi Minh run", () => {
+    const before = new Date("2026-05-23T23:30:00.000Z"); // 06:30 in Ho Chi Minh
+    const after = new Date("2026-05-24T01:00:00.000Z");  // 08:00 in Ho Chi Minh
+
+    expect(nextDailyRoutineRunAt(before, "Asia/Ho_Chi_Minh", 7, 0).toISOString()).toBe("2026-05-24T00:00:00.000Z");
+    expect(nextDailyRoutineRunAt(after, "Asia/Ho_Chi_Minh", 7, 0).toISOString()).toBe("2026-05-25T00:00:00.000Z");
   });
 });
