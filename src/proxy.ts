@@ -73,7 +73,7 @@ function stripUpstreamHeaders(headers: Headers) {
 }
 
 function isLimitErrorText(text: string): boolean {
-  return /rate[_-]?limit|limit[_-]?reached|usage[_-]?limit|quota|insufficient_quota/i.test(text);
+  return /rate[_-]?limit|limit[_-]?reached|usage[_-]?limit|quota|insufficient_quota|usage_limit|too_many_requests/i.test(text);
 }
 
 function isStreamFailureBody(text: string): boolean {
@@ -172,7 +172,7 @@ function detectStreamError(block: string): string | null {
     return (data || block).replace(/\s+/g, " ").trim();
   }
 
-  if (!/\b(error|failed|rate_limit|rate-limit)\b/i.test(block)) return null;
+  if (!/\b(error|failed|rate_limit|rate-limit|usage_limit|quota|limit_reached|too_many_requests)\b/i.test(block)) return null;
 
   const data = extractSseData(block);
   if (data && data !== "[DONE]") {
@@ -297,6 +297,51 @@ async function findVerifiedSwitchAccount(excludeAccountId: string): Promise<Acco
     );
   }
   return null;
+}
+
+function retryAfterMs(headers: Headers, fallbackMs = 60_000): number {
+  const raw = headers.get("retry-after");
+  if (!raw) return fallbackMs;
+
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+
+  return fallbackMs;
+}
+
+async function retryWithSwitchedAccount(
+  req: Request,
+  body: ArrayBuffer | null,
+  meta: ProxyMeta,
+  account: Account,
+  reason: "rate_limit" | "expired",
+  retries: number,
+  onStreamError?: StreamErrorCallback,
+  onStreamUsage?: StreamUsageCallback,
+  onAccountSwitch?: AccountSwitchCallback
+): Promise<Response | null> {
+  if (retries >= MAX_RETRIES) return null;
+
+  const nextAccount = await findVerifiedSwitchAccount(account.id);
+  if (!nextAccount || nextAccount.id === account.id) return null;
+
+  const label = reason === "rate_limit" ? "Rate limited" : "Token expired (401)";
+  console.log(
+    `[proxy] ${label} on ${account.email} → switching to ${nextAccount.email} (retry ${retries + 1}/${MAX_RETRIES})`
+  );
+  meta.accountSwitched = { from: account.email, to: nextAccount.email, reason };
+  meta.accountSwitchBroadcasted = true;
+  onAccountSwitch?.(meta.accountSwitched);
+
+  const retryReq = new Request(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: body ?? undefined,
+  });
+  return proxyRequestInner(retryReq, meta, onStreamError, onStreamUsage, onAccountSwitch, retries + 1);
 }
 
 function replayStream(
@@ -562,7 +607,7 @@ async function proxyRequestInner(
     console.log(`    ${k}: ${v}`);
   }
 
-  // ── Handle 401 (expired token) and 429 (rate limited) ────────────────────
+  // ── Handle expired tokens and quota errors with automatic account failover ─
   if (upstream.status === 401 || upstream.status === 429) {
     let errorText = "";
     try { errorText = await upstream.text(); } catch {}
@@ -599,29 +644,21 @@ async function proxyRequestInner(
 
       markExpired(account.id);
     } else {
-      const retryAfterMs = parseInt(upstream.headers.get("retry-after") ?? "60") * 1000;
-      markRateLimited(account.id, retryAfterMs);
+      markRateLimited(account.id, retryAfterMs(upstream.headers));
     }
 
-    if (retries < MAX_RETRIES) {
-      const nextAccount = await findVerifiedSwitchAccount(account.id);
-      if (nextAccount && nextAccount.id !== account.id) {
-        const label = reason === "rate_limit" ? "Rate limited" : "Token expired (401)";
-        console.log(
-          `[proxy] ${label} on ${account.email} → switching to ${nextAccount.email} (retry ${retries + 1}/${MAX_RETRIES})`
-        );
-        meta.accountSwitched = { from: account.email, to: nextAccount.email, reason };
-        meta.accountSwitchBroadcasted = true;
-        onAccountSwitch?.(meta.accountSwitched);
-
-        const retryReq = new Request(req.url, {
-          method: req.method,
-          headers: req.headers,
-          body: body ?? undefined,
-        });
-        return proxyRequestInner(retryReq, meta, onStreamError, onStreamUsage, onAccountSwitch, retries + 1);
-      }
-    }
+    const switched = await retryWithSwitchedAccount(
+      req,
+      body,
+      meta,
+      account,
+      reason,
+      retries,
+      onStreamError,
+      onStreamUsage,
+      onAccountSwitch
+    );
+    if (switched) return switched;
 
     // Max retries exhausted
     const errHeaders = new Headers(upstream.headers);
@@ -638,6 +675,21 @@ async function proxyRequestInner(
     try {
       const text = await upstream.clone().text();
       meta.errorSnippet = (text || `HTTP ${upstream.status} ${upstream.statusText}`).slice(0, 400);
+      if (isLimitErrorText(text)) {
+        markRateLimited(account.id, retryAfterMs(upstream.headers));
+        const switched = await retryWithSwitchedAccount(
+          req,
+          body,
+          meta,
+          account,
+          "rate_limit",
+          retries,
+          onStreamError,
+          onStreamUsage,
+          onAccountSwitch
+        );
+        if (switched) return switched;
+      }
     } catch {
       meta.errorSnippet = `HTTP ${upstream.status} ${upstream.statusText}`;
     }
@@ -653,21 +705,18 @@ async function proxyRequestInner(
     const preflight = await preflightCodexStream(upstream.body, account);
     if (preflight.kind === "limit_error") {
       meta.errorSnippet = preflight.snippet;
-      if (retries < MAX_RETRIES) {
-        const nextAccount = await findVerifiedSwitchAccount(account.id);
-        if (nextAccount && nextAccount.id !== account.id) {
-          meta.accountSwitched = { from: account.email, to: nextAccount.email, reason: "rate_limit" };
-          meta.accountSwitchBroadcasted = true;
-          onAccountSwitch?.(meta.accountSwitched);
-
-          const retryReq = new Request(req.url, {
-            method: req.method,
-            headers: req.headers,
-            body: body ?? undefined,
-          });
-          return proxyRequestInner(retryReq, meta, onStreamError, onStreamUsage, onAccountSwitch, retries + 1);
-        }
-      }
+      const switched = await retryWithSwitchedAccount(
+        req,
+        body,
+        meta,
+        account,
+        "rate_limit",
+        retries,
+        onStreamError,
+        onStreamUsage,
+        onAccountSwitch
+      );
+      if (switched) return switched;
 
       return new Response(
         JSON.stringify({ error: { message: preflight.snippet, type: "proxy_error" } }),
