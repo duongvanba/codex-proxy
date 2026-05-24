@@ -149,7 +149,7 @@ Bun.serve<WsData>({
     }
 
     if (path === "/health" && req.method === "GET") {
-      return Response.json(getLivequeryHealth(OPENAI_BASE_URL));
+      return Response.json(getLivequeryHealth(`${url.origin}/v1`));
     }
 
     if (
@@ -163,8 +163,8 @@ Bun.serve<WsData>({
 
     if (path.startsWith("/livequery/")) {
       return handleLivequeryRequest(req, {
-        openaiBaseUrl: OPENAI_BASE_URL,
-        publicBaseUrl: PUBLIC_BASE_URL,
+        openaiBaseUrl: `${url.origin}/v1`,
+        publicBaseUrl: url.origin,
         restartCodex,
       });
     }

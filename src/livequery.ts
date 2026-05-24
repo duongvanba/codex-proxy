@@ -257,6 +257,17 @@ export function getLivequeryRealtimeUrl(publicBaseUrl: string): string {
   return `${scheme}//${publicUrl.host}${LIVEQUERY_SOCKET_PATH}`;
 }
 
+function resolveOpenaiBaseUrl(publicBaseUrl: unknown, fallbackOpenaiBaseUrl: string) {
+  if (typeof publicBaseUrl !== "string") return fallbackOpenaiBaseUrl;
+  try {
+    const url = new URL(publicBaseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return fallbackOpenaiBaseUrl;
+    return `${url.origin}/v1`;
+  } catch {
+    return fallbackOpenaiBaseUrl;
+  }
+}
+
 async function handleAccounts(ctx: LivequeryContext): Promise<Response> {
   if (ctx.request.method !== "GET") {
     return error("METHOD_NOT_ALLOWED", "Accounts collection only supports GET", 405);
@@ -285,6 +296,7 @@ function handleReports(ctx: LivequeryContext): Response {
 
 async function handleAction(action: string, ctx: LivequeryContext, openaiBaseUrl: string, restartCodex: () => Promise<void>) {
   const payload = (ctx.request.body ?? {}) as Record<string, unknown>;
+  const effectiveOpenaiBaseUrl = resolveOpenaiBaseUrl(payload.publicBaseUrl, openaiBaseUrl);
 
   if (action === "refresh-usage") {
     await refreshCodexUsageForAccounts(true);
@@ -364,17 +376,17 @@ async function handleAction(action: string, ctx: LivequeryContext, openaiBaseUrl
   }
 
   if (action === "config-status") {
-    return json({ data: { enabled: isCodexConfigPatched(openaiBaseUrl) } });
+    return json({ data: { enabled: isCodexConfigPatched(effectiveOpenaiBaseUrl) } });
   }
 
   if (action === "set-config") {
     const enabled = Boolean(payload.enabled);
     const shouldRestartCodex = Boolean(payload.restartCodex);
-    if (enabled) patchCodexConfig(openaiBaseUrl);
+    if (enabled) patchCodexConfig(effectiveOpenaiBaseUrl);
     else restoreCodexConfig();
     saveProxyState(enabled);
     if (shouldRestartCodex) await restartCodex();
-    const state = isCodexConfigPatched(openaiBaseUrl);
+    const state = isCodexConfigPatched(effectiveOpenaiBaseUrl);
     logEvent("config_proxy", state ? "enabled" : "disabled");
     addReport({ type: "config_proxy", enabled: state, restarted: shouldRestartCodex, timestamp: Date.now() });
     return json({ data: { ok: true, enabled: state, restarted: shouldRestartCodex } });

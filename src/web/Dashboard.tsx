@@ -26,7 +26,7 @@ export function Dashboard() {
 
   async function refreshControlState() {
     const login = await accountsCollection.trigger<{ inProgress: boolean }>("login-status") as { inProgress: boolean };
-    const config = await accountsCollection.trigger<{ enabled: boolean }>("config-status") as { enabled: boolean };
+    const config = await accountsCollection.trigger<{ enabled: boolean }>("config-status", { publicBaseUrl: location.origin }) as { enabled: boolean };
     setLoginInProgress(Boolean(login.inProgress));
     setProxyEnabled(Boolean(config.enabled));
   }
@@ -98,7 +98,11 @@ export function Dashboard() {
     try {
       const restartCodex = confirm(`${enabled ? "Install" : "Uninstall"} proxy config. Restart Codex now?`);
       setProxyEnabled(enabled);
-      const result = await callAction<{ enabled: boolean; restarted: boolean }>("set-config", { enabled, restartCodex });
+      const result = await callAction<{ enabled: boolean; restarted: boolean }>("set-config", {
+        enabled,
+        restartCodex,
+        publicBaseUrl: location.origin,
+      });
       setProxyEnabled(Boolean(result.enabled));
       setNotice({
         type: "info",
