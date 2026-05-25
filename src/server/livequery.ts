@@ -53,6 +53,7 @@ const realtimeGatewayId = crypto.randomUUID();
 const realtimeClients = new Map<string, { send: (data: string) => void; refs: Set<string> }>();
 const realtimeRefs = new Map<string, Set<string>>();
 let accountsUsageRefresh: Promise<void> | null = null;
+let knownAccountIds = new Set(getAccounts().map((a) => a.id));
 
 function json<T>(payload: LivequeryResult<T>, init?: ResponseInit): Response {
   return Response.json(payload, init);
@@ -206,8 +207,18 @@ function publishRealtimeChanges(changes: RealtimeChange[]) {
 }
 
 function publishCollectionSnapshot(collection: "accounts" | "reports") {
-  const docs = collection === "accounts" ? getAccounts().map((account) => serializeAccount(account)) : reports;
-  publishRealtimeChanges(docs.map((doc) => ({ ref: collection, type: "modified", data: doc })));
+  if (collection !== "accounts") {
+    publishRealtimeChanges(reports.map((doc) => ({ ref: "reports", type: "modified" as const, data: doc })));
+    return;
+  }
+  const accounts = getAccounts().map((account) => serializeAccount(account));
+  const changes: RealtimeChange[] = accounts.map((doc) => ({
+    ref: "accounts",
+    type: knownAccountIds.has(doc.id) ? "modified" : "added",
+    data: doc,
+  }));
+  knownAccountIds = new Set(accounts.map((a) => a.id));
+  publishRealtimeChanges(changes);
 }
 
 function publishAccountRemoved(id: string) {

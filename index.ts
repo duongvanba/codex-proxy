@@ -1,11 +1,15 @@
-import { proxyRequest, buildWebSocketProxyData } from "./src/proxy";
+import { proxyRequest, buildWebSocketProxyData } from "./src/server/proxy";
 import {
+  getAccounts,
+  isUsableAccount,
+  markRateLimited,
   recordRequest,
-} from "./src/accounts";
-import { patchCodexConfig, restoreCodexConfig, loadProxyState } from "./src/config-patcher";
-import { getUnsupportedRoutesLogPath, proxyUnsupportedRoute } from "./src/unsupported-routes";
-import { watchCodexAuth } from "./src/watcher";
-import { logRequest, logEvent } from "./src/logger";
+  setSelectedAccount,
+} from "./src/server/accounts";
+import { patchCodexConfig, restoreCodexConfig, loadProxyState } from "./src/server/config-patcher";
+import { getUnsupportedRoutesLogPath, proxyUnsupportedRoute } from "./src/server/unsupported-routes";
+import { watchCodexAuth } from "./src/server/watcher";
+import { logRequest, logEvent } from "./src/server/logger";
 import {
   LIVEQUERY_SOCKET_PATH,
   addReport,
@@ -17,10 +21,19 @@ import {
   messageLivequerySocket,
   notifyAccountsChanged,
   openLivequerySocket,
-} from "./src/livequery";
-import { startDailyRoutineScheduler } from "./src/daily-routine";
+} from "./src/server/livequery";
+import { startDailyRoutineScheduler } from "./src/server/daily-routine";
+import {
+  buildWebSocketHeaders,
+  compactWebSocketPayload,
+  findWebSocketLimitSnippet,
+  isWebSocketSuccessPayload,
+  probeWebSocketAccount,
+  retryAfterMsFromSnippet,
+} from "./src/server/libs/chatgpt";
 import { join } from "path";
-import { existsSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync } from "fs";
+import type { Account } from "./src/server/types";
 
 const PORT = parseInt(process.env.PROXY_PORT ?? "9878");
 const CERTS_DIR = join(import.meta.dir, "certs");
@@ -33,8 +46,14 @@ const OPENAI_BASE_URL = `${PUBLIC_BASE_URL}/v1`;
 const WEB_DIR = join(import.meta.dir, "src/web");
 const WEB_BUILD_DIR = join(import.meta.dir, ".livequery-web");
 const WEB_BUNDLE = join(WEB_BUILD_DIR, "app.js");
+const WS_RESPONSE_LOG_FILE = join(import.meta.dir, "logs", "websocket-responses.ndjson");
 
 // ─── WebSocket proxy data ─────────────────────────────────────────────────────
+type ConversationTurn = {
+  input: any[];
+  output?: any[]; // populated from response.completed; undefined = turn not yet complete
+};
+
 interface WsData {
   kind?: "codex" | "livequery";
   upstreamUrl?: string;
@@ -42,8 +61,15 @@ interface WsData {
   email?: string;
   accountId?: string;
   upstream?: WebSocket;
+  firstMessage?: string | Buffer;
+  isNewPrompt?: boolean;
+  limitReported?: boolean;
+  switchingAccount?: boolean;
+  suppressNextClose?: boolean;
+  switchAttemptedAccountIds?: Set<string>;
   livequeryClientId?: string;
   livequeryRefs?: Set<string>;
+  conversationBuffer?: ConversationTurn[];
 }
 
 // ─── SSE log broadcast ────────────────────────────────────────────────────────
@@ -52,6 +78,282 @@ function broadcastLog(entry: object) {
   addReport(entry as any);
   const data = `data: ${JSON.stringify(entry)}\n\n`;
   for (const send of logClients) send(data);
+}
+
+function writeWebSocketResponseLog(entry: Record<string, unknown>) {
+  try {
+    mkdirSync(join(import.meta.dir, "logs"), { recursive: true });
+    appendFileSync(WS_RESPONSE_LOG_FILE, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // WebSocket replay logs are diagnostic only; never break the live stream.
+  }
+}
+
+function serializeWebSocketPayload(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    return {
+      payloadType: "text",
+      payload: value,
+      byteLength: new TextEncoder().encode(value).byteLength,
+    };
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return {
+      payloadType: "binary",
+      payloadBase64: Buffer.from(value).toString("base64"),
+      byteLength: value.byteLength,
+    };
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    return {
+      payloadType: "binary",
+      payloadBase64: bytes.toString("base64"),
+      byteLength: value.byteLength,
+    };
+  }
+
+  const payload = String(value);
+  return {
+    payloadType: "text",
+    payload,
+    byteLength: new TextEncoder().encode(payload).byteLength,
+  };
+}
+
+function logWebSocketUpstreamResponse(ws: { data: WsData }, payload: unknown, latencyMs: number) {
+  writeWebSocketResponseLog({
+    type: "ws_upstream_message",
+    timestamp: Date.now(),
+    email: ws.data.email ?? "",
+    accountId: ws.data.accountId ?? "",
+    upstreamUrl: ws.data.upstreamUrl ?? "",
+    latencyMs,
+    ...serializeWebSocketPayload(payload),
+  });
+}
+
+function logWebSocketUpstreamClose(ws: { data: WsData }, code: number, reason: string, latencyMs: number) {
+  writeWebSocketResponseLog({
+    type: "ws_upstream_close",
+    timestamp: Date.now(),
+    email: ws.data.email ?? "",
+    accountId: ws.data.accountId ?? "",
+    upstreamUrl: ws.data.upstreamUrl ?? "",
+    code,
+    reason,
+    latencyMs,
+  });
+}
+
+function reportWebSocketLimit(
+  ws: { data: WsData },
+  snippet: string,
+  latencyMs: number
+) {
+  if (ws.data.limitReported || !ws.data.accountId) return;
+  ws.data.limitReported = true;
+
+  const retryAfterMs = retryAfterMsFromSnippet(snippet);
+  markRateLimited(ws.data.accountId, retryAfterMs);
+
+  const entry = {
+    type: "ws_limit",
+    timestamp: Date.now(),
+    email: ws.data.email,
+    status: 429,
+    latencyMs,
+    errorSnippet: snippet,
+  };
+  console.warn(`[ws] limit detected [${ws.data.email}] ${snippet.slice(0, 200)}`);
+  broadcastLog(entry);
+  logRequest({
+    timestamp: entry.timestamp,
+    method: "WS",
+    path: ws.data.upstreamUrl ? new URL(ws.data.upstreamUrl).pathname : "/v1/responses",
+    status: 429,
+    latencyMs,
+    email: ws.data.email ?? "",
+    errorSnippet: snippet,
+  });
+  notifyAccountsChanged();
+}
+
+function getWebSocketSwitchCandidates(ws: { data: WsData }) {
+  const attempted = ws.data.switchAttemptedAccountIds ?? new Set<string>();
+  const currentId = ws.data.accountId;
+  return getAccounts().filter((account) =>
+    account.id !== currentId &&
+    !attempted.has(account.id) &&
+    isUsableAccount(account) &&
+    Boolean(account.accessToken && account.accountId)
+  );
+}
+
+function rebuildFirstMessageWithContext(
+  firstMessage: string | Buffer,
+  buffer: ConversationTurn[]
+): string {
+  const base = compactWebSocketPayload(firstMessage);
+  try {
+    const parsed = JSON.parse(base);
+    delete parsed.previous_response_id;
+
+    const fullInput: any[] = [];
+    for (const turn of buffer) {
+      fullInput.push(...(turn.input ?? []));
+      if (turn.output) fullInput.push(...turn.output);
+    }
+
+    return JSON.stringify({ ...parsed, input: fullInput });
+  } catch {
+    return base;
+  }
+}
+
+function sendWebSocketProxyError(ws: { send(data: string): void; close(code?: number, reason?: string): void }, message: string) {
+  try {
+    ws.send(JSON.stringify({
+      type: "error",
+      error: {
+        type: "proxy_error",
+        message,
+      },
+      status_code: 429,
+    }));
+  } catch {}
+  try { ws.close(1013, "no switchable account"); } catch {}
+}
+
+async function handleWebSocketLimit(
+  ws: { send(data: string | ArrayBuffer): void; close(code?: number, reason?: string): void; data: WsData },
+  snippet: string,
+  latencyMs: number
+) {
+  reportWebSocketLimit(ws, snippet, latencyMs);
+  if (ws.data.switchingAccount) return;
+
+  ws.data.switchingAccount = true;
+  ws.data.switchAttemptedAccountIds ??= new Set<string>();
+  if (ws.data.accountId) ws.data.switchAttemptedAccountIds.add(ws.data.accountId);
+
+  try {
+    ws.data.suppressNextClose = true;
+    try { ws.data.upstream?.close(1000, "switching account"); } catch {}
+
+    const upstreamUrl = ws.data.upstreamUrl;
+    if (!upstreamUrl || !ws.data.firstMessage) {
+      sendWebSocketProxyError(ws, "Current WebSocket request cannot be replayed after limit.");
+      return;
+    }
+
+    for (const candidate of getWebSocketSwitchCandidates(ws)) {
+      ws.data.switchAttemptedAccountIds.add(candidate.id);
+      console.log(`[ws] probing switch candidate: ${candidate.email}`);
+      const probe = await probeWebSocketAccount(upstreamUrl, ws.data.headers, candidate, ws.data.firstMessage);
+
+      if (!probe.ok) {
+        console.warn(`[ws] probe failed for ${candidate.email}: ${probe.error}`);
+        if (probe.limitSnippet) markRateLimited(candidate.id, retryAfterMsFromSnippet(probe.limitSnippet));
+        notifyAccountsChanged();
+        continue;
+      }
+
+      const from = ws.data.email ?? "";
+      setSelectedAccount(candidate.id);
+      ws.data.email = candidate.email;
+      ws.data.accountId = candidate.id;
+      ws.data.headers = buildWebSocketHeaders(ws.data.headers, candidate);
+      ws.data.limitReported = false;
+      ws.data.switchingAccount = false;
+
+      logEvent("account_switched", `${from} → ${candidate.email} [rate_limit]`);
+      broadcastLog({ type: "account_switched", from, to: candidate.email, reason: "rate_limit", timestamp: Date.now() });
+      notifyAccountsChanged();
+
+      const messageToSend = ws.data.conversationBuffer && ws.data.conversationBuffer.length > 0
+        ? rebuildFirstMessageWithContext(ws.data.firstMessage!, ws.data.conversationBuffer)
+        : ws.data.firstMessage!;
+      // Reset buffer to the flattened state so subsequent switches stay correct
+      try {
+        const parsed = JSON.parse(typeof messageToSend === "string" ? messageToSend : compactWebSocketPayload(messageToSend));
+        ws.data.conversationBuffer = [{ input: parsed.input ?? [] }];
+        ws.data.firstMessage = messageToSend as any;
+      } catch {}
+      openCodexUpstream(ws, messageToSend);
+      return;
+    }
+
+    sendWebSocketProxyError(ws, "All candidate accounts are limited or failed the WebSocket probe.");
+  } finally {
+    ws.data.switchingAccount = false;
+  }
+}
+
+function openCodexUpstream(
+  ws: { send(data: string | ArrayBuffer): void; close(code?: number, reason?: string): void; data: WsData },
+  message: string | Buffer
+) {
+  const upstream = new WebSocket(ws.data.upstreamUrl!, {
+    // @ts-ignore — Bun extension: headers supported in WebSocket constructor
+    headers: ws.data.headers!,
+  });
+  ws.data.upstream = upstream;
+  const wsStart = Date.now();
+
+  upstream.addEventListener("open", () => {
+    console.log(`[ws] upstream open [${ws.data.email}] new_prompt=${Boolean(ws.data.isNewPrompt)}`);
+    if (ws.data.isNewPrompt && ws.data.accountId) recordRequest(ws.data.accountId);
+    broadcastLog({ type: "ws_open", email: ws.data.email, timestamp: Date.now() });
+    try { upstream.send(message); } catch {}
+  });
+  upstream.addEventListener("message", (ev) => {
+    try {
+      logWebSocketUpstreamResponse(ws, ev.data, Date.now() - wsStart);
+      const data = ev.data instanceof ArrayBuffer ? ev.data : String(ev.data);
+      if (typeof data === "string") console.log(`[ws←up] [${ws.data.email}] ${data.slice(0, 200)}`);
+      const limitSnippet = findWebSocketLimitSnippet(data);
+      if (limitSnippet) {
+        void handleWebSocketLimit(ws, limitSnippet, Date.now() - wsStart);
+        return;
+      }
+      ws.send(data);
+      if (typeof data === "string" && ws.data.conversationBuffer && data.includes('"response.completed"')) {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.type === "response.completed" && Array.isArray(parsed?.response?.output)) {
+            const lastTurn = ws.data.conversationBuffer[ws.data.conversationBuffer.length - 1];
+            if (lastTurn) lastTurn.output = parsed.response.output;
+          }
+        } catch {}
+      }
+    } catch {}
+  });
+  upstream.addEventListener("close", (ev) => {
+    const latencyMs = Date.now() - wsStart;
+    console.log(`[ws] upstream closed: ${ev.code} ${ev.reason ?? ""} [${ws.data.email}]`);
+    logWebSocketUpstreamClose(ws, ev.code, ev.reason ?? "", latencyMs);
+    if (ws.data.suppressNextClose) {
+      ws.data.suppressNextClose = false;
+      return;
+    }
+    const limitSnippet = ev.reason ? findWebSocketLimitSnippet(ev.reason) : null;
+    if (limitSnippet) {
+      void handleWebSocketLimit(ws, limitSnippet, latencyMs);
+      return;
+    }
+    broadcastLog({ type: "ws_close", email: ws.data.email, code: ev.code, latencyMs, timestamp: Date.now() });
+    try { ws.close(ev.code || 1000, ev.reason); } catch {}
+  });
+  upstream.addEventListener("error", () => {
+    console.error(`[ws] upstream error [${ws.data.email}]`);
+    broadcastLog({ type: "ws_error", email: ws.data.email, timestamp: Date.now() });
+    if (!ws.data.switchingAccount) {
+      try { ws.close(1011, "upstream error"); } catch {}
+    }
+  });
 }
 
 async function restartCodex() {
@@ -354,43 +656,28 @@ Bun.serve<WsData>({
           } catch {}
         }
 
-        // First message: open upstream now and send immediately on open
-        const upstream = new WebSocket(ws.data.upstreamUrl!, {
-          // @ts-ignore — Bun extension: headers supported in WebSocket constructor
-          headers: ws.data.headers!,
-        });
-        ws.data.upstream = upstream;
-        const wsStart = Date.now();
-
-        upstream.addEventListener("open", () => {
-          console.log(`[ws] upstream open [${ws.data.email}] new_prompt=${isNewPrompt}`);
-          if (isNewPrompt && ws.data.accountId) recordRequest(ws.data.accountId);
-          broadcastLog({ type: "ws_open", email: ws.data.email, timestamp: Date.now() });
-          try { upstream.send(message); } catch {}
-        });
-        upstream.addEventListener("message", (ev) => {
+        ws.data.firstMessage = message as any;
+        ws.data.isNewPrompt = isNewPrompt;
+        if (typeof message === "string") {
           try {
-            const data = ev.data instanceof ArrayBuffer ? ev.data : String(ev.data);
-            if (typeof data === "string") console.log(`[ws←up] [${ws.data.email}] ${data.slice(0, 200)}`);
-            ws.send(data);
+            const data = JSON.parse(message);
+            ws.data.conversationBuffer = [{ input: data.input ?? [] }];
           } catch {}
-        });
-        upstream.addEventListener("close", (ev) => {
-          const latencyMs = Date.now() - wsStart;
-          console.log(`[ws] upstream closed: ${ev.code} ${ev.reason ?? ""} [${ws.data.email}]`);
-          broadcastLog({ type: "ws_close", email: ws.data.email, code: ev.code, latencyMs, timestamp: Date.now() });
-          try { ws.close(ev.code || 1000, ev.reason); } catch {}
-        });
-        upstream.addEventListener("error", () => {
-          console.error(`[ws] upstream error [${ws.data.email}]`);
-          broadcastLog({ type: "ws_error", email: ws.data.email, timestamp: Date.now() });
-          try { ws.close(1011, "upstream error"); } catch {}
-        });
+        }
+        openCodexUpstream(ws as any, message as any);
         return;
       }
 
-      // Subsequent messages: forward directly
+      // Subsequent messages: capture tool outputs then forward
       if (ws.data.upstream.readyState === WebSocket.OPEN) {
+        if (typeof message === "string" && ws.data.conversationBuffer) {
+          try {
+            const data = JSON.parse(message as string);
+            if (Array.isArray(data?.input)) {
+              ws.data.conversationBuffer.push({ input: data.input });
+            }
+          } catch {}
+        }
         ws.data.upstream.send(message);
       }
     },

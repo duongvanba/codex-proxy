@@ -8,21 +8,34 @@ import {
 } from "./accounts";
 import { readAuth } from "./watcher";
 import type { Account } from "./types";
+import {
+  CHATGPT_BASE,
+  CODEX_RESPONSES_PATH,
+  buildCodexHttpHeaders,
+  buildWebSocketHeaders,
+  decodeTokenInfo,
+  detectStreamError,
+  detectTokenUsage,
+  isRateLimitText,
+  isStreamFailureBody,
+  isSseSuccessBlock,
+} from "./libs/chatgpt";
+
+export type { TokenUsage } from "./libs/chatgpt";
 
 // Route based on path prefix
 type Route = { prefix: string; target: string; rewrite?: (pathname: string) => string };
 const ROUTES: Route[] = [
   {
     prefix: "/v1/responses",
-    target: "https://chatgpt.com",
-    rewrite: (pathname) => pathname.replace(/^\/v1\/responses/, "/backend-api/codex/responses"),
+    target: CHATGPT_BASE,
+    rewrite: (pathname) => pathname.replace(/^\/v1\/responses/, CODEX_RESPONSES_PATH),
   },
   { prefix: "/v1/", target: "https://api.openai.com" },
-  { prefix: "/backend-api/", target: "https://chatgpt.com" },
+  { prefix: "/backend-api/", target: CHATGPT_BASE },
 ];
 
 const MAX_RETRIES = 3;
-const CODEX_RESPONSES_PATH = "/backend-api/codex/responses";
 const STRIP_UPSTREAM_HEADERS = [
   "cdn-loop",
   "cf-connecting-ip",
@@ -58,66 +71,6 @@ const STRIP_UPSTREAM_HEADERS = [
   "x-request-start",
 ];
 
-function resolveRoute(pathname: string): Route | null {
-  for (const route of ROUTES) {
-    if (pathname.startsWith(route.prefix)) return route;
-  }
-  return null;
-}
-
-function stripUpstreamHeaders(headers: Headers) {
-  for (const name of STRIP_UPSTREAM_HEADERS) headers.delete(name);
-  for (const name of Array.from(headers.keys())) {
-    if (name.toLowerCase().startsWith("cf-")) headers.delete(name);
-  }
-}
-
-function isLimitErrorText(text: string): boolean {
-  return /rate[_-]?limit|limit[_-]?reached|usage[_-]?limit|quota|insufficient_quota|usage_limit|too_many_requests/i.test(text);
-}
-
-function isStreamFailureBody(text: string): boolean {
-  return /event:\s*(response\.failed|error)|"type"\s*:\s*"response\.failed"|"status"\s*:\s*"failed"/i.test(text);
-}
-
-function codexHeadersForAccount(account: Account, accept = "text/event-stream"): Headers {
-  const headers = new Headers();
-  headers.set("Authorization", `Bearer ${account.accessToken}`);
-  headers.set("ChatGPT-Account-Id", account.accountId);
-  headers.set("OpenAI-Beta", "responses=experimental");
-  headers.set("Origin", "https://chatgpt.com");
-  headers.set("Referer", "https://chatgpt.com/");
-  headers.set("Originator", "codex_cli_rs");
-  headers.set("Version", "0.133.0");
-  headers.set("User-Agent", "codex_cli_rs/0.133.0 (Mac OS; arm64)");
-  headers.set("Accept", accept);
-  headers.set("Content-Type", "application/json");
-  headers.set("Accept-Encoding", "identity");
-  headers.set("X-Oai-Web-Search-Eligible", "true");
-  return headers;
-}
-
-// Decode JWT exp field for diagnostics — no crypto needed, just base64
-function tokenInfo(token: string): { expiresAt: string; isExpired: boolean; ageMin: number } {
-  try {
-    const [, payload] = token.split(".");
-    if (!payload) throw new Error("no payload");
-    const decoded = JSON.parse(
-      Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()
-    );
-    if (!decoded.exp) return { expiresAt: "no_exp", isExpired: false, ageMin: 0 };
-    const expMs = decoded.exp * 1000;
-    const nowMs = Date.now();
-    return {
-      expiresAt: new Date(expMs).toISOString(),
-      isExpired: nowMs > expMs,
-      ageMin: Math.round((nowMs - expMs) / 60_000), // positive = expired N min ago
-    };
-  } catch {
-    return { expiresAt: "invalid", isExpired: false, ageMin: 0 };
-  }
-}
-
 // Metadata attached to every proxied request — used by index.ts for SSE + file logs
 export type ProxyMeta = {
   email: string;
@@ -132,18 +85,10 @@ export type StreamErrorEvent = {
   errorSnippet: string;
 };
 
-export type TokenUsage = {
-  inputTokens?: number;
-  cachedInputTokens?: number;
-  outputTokens?: number;
-  reasoningTokens?: number;
-  totalTokens?: number;
-};
-
 export type StreamUsageEvent = {
   email: string;
   status: number;
-  usage: TokenUsage;
+  usage: import("./libs/chatgpt").TokenUsage;
 };
 
 export type AccountSwitchEvent = {
@@ -156,74 +101,17 @@ type StreamErrorCallback = (event: StreamErrorEvent) => void;
 type StreamUsageCallback = (event: StreamUsageEvent) => void;
 type AccountSwitchCallback = (event: AccountSwitchEvent) => void;
 
-function extractSseData(block: string): string {
-  return block
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trimStart())
-    .join("\n")
-    .trim();
-}
-
-function detectStreamError(block: string): string | null {
-  const eventLine = block.match(/^event:\s*(.+)$/im)?.[1]?.trim() ?? "";
-  if (/^(response\.failed|error)$/i.test(eventLine)) {
-    const data = extractSseData(block);
-    return (data || block).replace(/\s+/g, " ").trim();
+function resolveRoute(pathname: string): Route | null {
+  for (const route of ROUTES) {
+    if (pathname.startsWith(route.prefix)) return route;
   }
-
-  if (!/\b(error|failed|rate_limit|rate-limit|usage_limit|quota|limit_reached|too_many_requests)\b/i.test(block)) return null;
-
-  const data = extractSseData(block);
-  if (data && data !== "[DONE]") {
-    try {
-      const parsed = JSON.parse(data);
-      const type = String(parsed.type ?? parsed.error?.type ?? "");
-      const nestedError = parsed.error ?? parsed.response?.error ?? null;
-      const message = nestedError?.message ?? parsed.message;
-      const status = parsed.response?.status ?? parsed.status;
-      const failedType = type.includes("failed") || type.includes("error");
-      if (nestedError || failedType || /rate[_-]?limit/i.test(JSON.stringify(nestedError ?? ""))) {
-        return JSON.stringify({ type: type || undefined, status, error: nestedError ?? message ?? parsed });
-      }
-      return null;
-    } catch {
-      // Fall through to a compact raw SSE block when upstream sends non-JSON errors.
-    }
-  }
-
-  if (/event:\s*(response\.failed|error)|"type"\s*:\s*"error"/i.test(block)) {
-    return block.replace(/\s+/g, " ").trim();
-  }
-
   return null;
 }
 
-function isSseSuccessBlock(block: string): boolean {
-  return /event:\s*(response\.output_text\.delta|response\.output_text\.done|response\.completed)|"type"\s*:\s*"(response\.output_text\.delta|response\.output_text\.done|response\.completed)"/i.test(block);
-}
-
-function detectTokenUsage(block: string): TokenUsage | null {
-  const eventLine = block.match(/^event:\s*(.+)$/im)?.[1]?.trim() ?? "";
-  if (eventLine !== "response.completed") return null;
-
-  const data = extractSseData(block);
-  if (!data || data === "[DONE]") return null;
-
-  try {
-    const parsed = JSON.parse(data);
-    const usage = parsed.response?.usage ?? parsed.usage;
-    if (!usage) return null;
-
-    return {
-      inputTokens: usage.input_tokens,
-      cachedInputTokens: usage.input_tokens_details?.cached_tokens,
-      outputTokens: usage.output_tokens,
-      reasoningTokens: usage.output_tokens_details?.reasoning_tokens,
-      totalTokens: usage.total_tokens,
-    };
-  } catch {
-    return null;
+function stripUpstreamHeaders(headers: Headers) {
+  for (const name of STRIP_UPSTREAM_HEADERS) headers.delete(name);
+  for (const name of Array.from(headers.keys())) {
+    if (name.toLowerCase().startsWith("cf-")) headers.delete(name);
   }
 }
 
@@ -233,12 +121,7 @@ async function probeAccount(account: Account): Promise<{ ok: boolean; error?: st
     store: false,
     stream: true,
     instructions: "Reply with OK only.",
-    input: [
-      {
-        role: "user",
-        content: [{ type: "input_text", text: "hello" }],
-      },
-    ],
+    input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
     tool_choice: "auto",
     parallel_tool_calls: true,
     include: ["reasoning.encrypted_content"],
@@ -246,9 +129,9 @@ async function probeAccount(account: Account): Promise<{ ok: boolean; error?: st
   });
 
   try {
-    const res = await fetch(`https://chatgpt.com${CODEX_RESPONSES_PATH}`, {
+    const res = await fetch(`${CHATGPT_BASE}${CODEX_RESPONSES_PATH}`, {
       method: "POST",
-      headers: codexHeadersForAccount(account),
+      headers: buildCodexHttpHeaders(account),
       body,
     });
     const text = await res.text();
@@ -269,7 +152,7 @@ async function probeAccount(account: Account): Promise<{ ok: boolean; error?: st
     }
 
     if (isStreamFailureBody(text)) {
-      if (isLimitErrorText(text)) markRateLimited(account.id);
+      if (isRateLimitText(text)) markRateLimited(account.id);
       return { ok: false, status: res.status, error: text.slice(0, 200) || "probe stream failed" };
     }
 
@@ -407,7 +290,7 @@ async function preflightCodexStream(
     for (const block of blocks) {
       blockCount++;
       const snippet = detectStreamError(block);
-      if (snippet && isLimitErrorText(snippet)) {
+      if (snippet && isRateLimitText(snippet)) {
         markRateLimited(account.id);
         await reader.cancel().catch(() => {});
         return { kind: "limit_error", snippet: snippet.slice(0, 800) };
@@ -447,7 +330,7 @@ function streamWithErrorTap(
             const snippet = detectStreamError(buffer);
             if (snippet) {
               reportedError = true;
-              if (isLimitErrorText(snippet)) markRateLimited(account.id);
+              if (isRateLimitText(snippet)) markRateLimited(account.id);
               onStreamError({ email: account.email, status, errorSnippet: snippet.slice(0, 800) });
             }
           }
@@ -474,7 +357,7 @@ function streamWithErrorTap(
               const snippet = detectStreamError(block);
               if (snippet) {
                 reportedError = true;
-                if (isLimitErrorText(snippet)) markRateLimited(account.id);
+                if (isRateLimitText(snippet)) markRateLimited(account.id);
                 onStreamError({ email: account.email, status, errorSnippet: snippet.slice(0, 800) });
               }
             }
@@ -487,9 +370,7 @@ function streamWithErrorTap(
               }
             }
 
-            if (reportedError && reportedUsage) {
-              break;
-            }
+            if (reportedError && reportedUsage) break;
           }
         }
 
@@ -548,14 +429,13 @@ async function proxyRequestInner(
   const targetPath = route.rewrite ? route.rewrite(url.pathname) : url.pathname;
   const targetUrl = route.target + targetPath + url.search;
 
-  // ── Replace Authorization with the active account's REAL credential ──────
   const headers = new Headers(req.headers);
   headers.set("Authorization", `Bearer ${account.accessToken}`);
   if (targetPath.startsWith("/backend-api/codex/")) {
     headers.set("ChatGPT-Account-Id", account.accountId);
     headers.set("OpenAI-Beta", "responses=experimental");
-    headers.set("Origin", "https://chatgpt.com");
-    headers.set("Referer", "https://chatgpt.com/");
+    headers.set("Origin", CHATGPT_BASE);
+    headers.set("Referer", `${CHATGPT_BASE}/`);
     headers.set("Originator", "codex_cli_rs");
     headers.set("Version", "0.133.0");
     headers.set("User-Agent", "codex_cli_rs/0.133.0 (Mac OS; arm64)");
@@ -570,7 +450,6 @@ async function proxyRequestInner(
     body = await req.arrayBuffer();
   }
 
-  // ── Log outgoing request ─────────────────────────────────────────────────
   const tokenSnippet = account.accessToken.slice(-12);
   console.log(`\n[proxy →] ${req.method} ${targetUrl}`);
   console.log(`  account : ${account.email}`);
@@ -588,11 +467,7 @@ async function proxyRequestInner(
   const start = Date.now();
   let upstream: Response;
   try {
-    upstream = await fetch(targetUrl, {
-      method: req.method,
-      headers,
-      body,
-    });
+    upstream = await fetch(targetUrl, { method: req.method, headers, body });
   } catch (e) {
     return new Response(
       JSON.stringify({ error: { message: `Proxy upstream error: ${e}`, type: "proxy_error" } }),
@@ -607,7 +482,6 @@ async function proxyRequestInner(
     console.log(`    ${k}: ${v}`);
   }
 
-  // ── Handle expired tokens and quota errors with automatic account failover ─
   if (upstream.status === 401 || upstream.status === 429) {
     let errorText = "";
     try { errorText = await upstream.text(); } catch {}
@@ -616,23 +490,19 @@ async function proxyRequestInner(
     const reason: "rate_limit" | "expired" = upstream.status === 429 ? "rate_limit" : "expired";
 
     if (upstream.status === 401) {
-      // ── Diagnostic: decode token to understand why 401 happened ───────────
-      const info = tokenInfo(account.accessToken);
+      const info = decodeTokenInfo(account.accessToken);
       console.error(`[proxy] 401 on ${account.email}`);
       console.error(`  token_exp : ${info.expiresAt}`);
       console.error(`  is_expired: ${info.isExpired}${info.isExpired ? ` (${info.ageMin}m ago)` : ""}`);
       console.error(`  401 body  : ${errorText}`);
 
-      // ── Try reading a fresher token straight from auth.json ───────────────
-      // Race condition: Codex may have refreshed its token milliseconds ago
-      // but the watcher hasn't fired yet. Check auth.json directly.
       if (retries === 0) {
         const freshAuth = readAuth();
         const freshToken = freshAuth?.tokens?.access_token;
         if (freshToken && freshToken !== account.accessToken) {
           console.log(`[proxy] auth.json has a fresher token — using it directly`);
           const { importFromTokens } = await import("./accounts");
-          importFromTokens(freshAuth!.tokens); // update DB
+          importFromTokens(freshAuth!.tokens);
           const retryReq = new Request(req.url, {
             method: req.method,
             headers: req.headers,
@@ -648,19 +518,10 @@ async function proxyRequestInner(
     }
 
     const switched = await retryWithSwitchedAccount(
-      req,
-      body,
-      meta,
-      account,
-      reason,
-      retries,
-      onStreamError,
-      onStreamUsage,
-      onAccountSwitch
+      req, body, meta, account, reason, retries, onStreamError, onStreamUsage, onAccountSwitch
     );
     if (switched) return switched;
 
-    // Max retries exhausted
     const errHeaders = new Headers(upstream.headers);
     errHeaders.delete("content-encoding");
     return new Response(errorText, {
@@ -670,23 +531,14 @@ async function proxyRequestInner(
     });
   }
 
-  // ── Other 4xx/5xx: capture snippet for log ────────────────────────────────
   if (upstream.status >= 400) {
     try {
       const text = await upstream.clone().text();
       meta.errorSnippet = (text || `HTTP ${upstream.status} ${upstream.statusText}`).slice(0, 400);
-      if (isLimitErrorText(text)) {
+      if (isRateLimitText(text)) {
         markRateLimited(account.id, retryAfterMs(upstream.headers));
         const switched = await retryWithSwitchedAccount(
-          req,
-          body,
-          meta,
-          account,
-          "rate_limit",
-          retries,
-          onStreamError,
-          onStreamUsage,
-          onAccountSwitch
+          req, body, meta, account, "rate_limit", retries, onStreamError, onStreamUsage, onAccountSwitch
         );
         if (switched) return switched;
       }
@@ -697,7 +549,6 @@ async function proxyRequestInner(
 
   if (upstream.status < 400) recordRequest(account.id);
 
-  // ── Stream response back ──────────────────────────────────────────────────
   const responseHeaders = new Headers(upstream.headers);
   responseHeaders.delete("content-encoding");
   let responseBody = upstream.body;
@@ -706,15 +557,7 @@ async function proxyRequestInner(
     if (preflight.kind === "limit_error") {
       meta.errorSnippet = preflight.snippet;
       const switched = await retryWithSwitchedAccount(
-        req,
-        body,
-        meta,
-        account,
-        "rate_limit",
-        retries,
-        onStreamError,
-        onStreamUsage,
-        onAccountSwitch
+        req, body, meta, account, "rate_limit", retries, onStreamError, onStreamUsage, onAccountSwitch
       );
       if (switched) return switched;
 
@@ -726,13 +569,7 @@ async function proxyRequestInner(
     responseBody = preflight.body as typeof responseBody;
   }
 
-  const bodyWithErrorTap = streamWithErrorTap(
-    responseBody,
-    account,
-    upstream.status,
-    onStreamError,
-    onStreamUsage
-  );
+  const bodyWithErrorTap = streamWithErrorTap(responseBody, account, upstream.status, onStreamError, onStreamUsage);
   return new Response(bodyWithErrorTap, {
     status: upstream.status,
     statusText: upstream.statusText,
@@ -740,7 +577,6 @@ async function proxyRequestInner(
   });
 }
 
-// Public API — returns Response + rich metadata for SSE and file logging
 export async function proxyRequest(
   req: Request,
   onStreamError?: StreamErrorCallback,
@@ -752,7 +588,6 @@ export async function proxyRequest(
   return { response, meta };
 }
 
-// Build data needed to proxy a WebSocket upgrade request
 export function buildWebSocketProxyData(req: Request): {
   upstreamUrl: string;
   headers: Record<string, string>;
@@ -770,29 +605,16 @@ export function buildWebSocketProxyData(req: Request): {
   const wsTarget = route.target.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://");
   const upstreamUrl = wsTarget + targetPath + url.search;
 
-  const headers = new Headers(req.headers);
-  headers.set("Authorization", `Bearer ${account.accessToken}`);
-  if (targetPath.startsWith("/backend-api/codex/")) {
-    headers.set("ChatGPT-Account-Id", account.accountId);
-    headers.set("OpenAI-Beta", "responses=experimental");
-    headers.set("Origin", "https://chatgpt.com");
-    headers.set("Referer", "https://chatgpt.com/");
-    headers.set("Originator", "codex_cli_rs");
-    headers.set("Version", "0.133.0");
-    headers.set("User-Agent", "codex_cli_rs/0.133.0 (Mac OS; arm64)");
-    headers.set("X-Oai-Web-Search-Eligible", "true");
-  }
-  stripUpstreamHeaders(headers);
-  if (account.accountId) headers.set("chatgpt-account-id", account.accountId);
+  const base = new Headers(req.headers);
+  stripUpstreamHeaders(base);
+
+  const headers = targetPath.startsWith("/backend-api/codex/")
+    ? buildWebSocketHeaders(Object.fromEntries(base.entries()), account)
+    : { ...Object.fromEntries(base.entries()), Authorization: `Bearer ${account.accessToken}` };
 
   console.log(`\n[ws →] ${url.pathname} [${account.email}]`);
   console.log(`  upstream: ${upstreamUrl}`);
   console.log(`  token   : ...${account.accessToken.slice(-12)}`);
 
-  return {
-    upstreamUrl,
-    headers: Object.fromEntries(headers.entries()),
-    email: account.email,
-    accountId: account.id,
-  };
+  return { upstreamUrl, headers, email: account.email, accountId: account.id };
 }

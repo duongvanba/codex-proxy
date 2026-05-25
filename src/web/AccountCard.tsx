@@ -85,9 +85,7 @@ function hasRemoteQuota(account: AccountDoc) {
 }
 
 function isSwitchableAccount(account: AccountDoc) {
-  if (account.status !== "active") return false;
-  if (account.codexUsage?.error) return false;
-  return hasFallbackQuota(account) && hasRemoteQuota(account);
+  return account.status !== "expired";
 }
 
 function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: boolean }) {
