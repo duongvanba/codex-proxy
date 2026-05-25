@@ -49,11 +49,6 @@ const WEB_BUNDLE = join(WEB_BUILD_DIR, "app.js");
 const WS_RESPONSE_LOG_FILE = join(import.meta.dir, "logs", "websocket-responses.ndjson");
 
 // ─── WebSocket proxy data ─────────────────────────────────────────────────────
-type ConversationTurn = {
-  input: any[];
-  output?: any[]; // populated from response.completed; undefined = turn not yet complete
-};
-
 interface WsData {
   kind?: "codex" | "livequery";
   upstreamUrl?: string;
@@ -69,7 +64,6 @@ interface WsData {
   switchAttemptedAccountIds?: Set<string>;
   livequeryClientId?: string;
   livequeryRefs?: Set<string>;
-  conversationBuffer?: ConversationTurn[];
 }
 
 // ─── SSE log broadcast ────────────────────────────────────────────────────────
@@ -192,26 +186,6 @@ function getWebSocketSwitchCandidates(ws: { data: WsData }) {
   );
 }
 
-function rebuildFirstMessageWithContext(
-  firstMessage: string | Buffer,
-  buffer: ConversationTurn[]
-): string {
-  const base = compactWebSocketPayload(firstMessage);
-  try {
-    const parsed = JSON.parse(base);
-    delete parsed.previous_response_id;
-
-    const fullInput: any[] = [];
-    for (const turn of buffer) {
-      fullInput.push(...(turn.input ?? []));
-      if (turn.output) fullInput.push(...turn.output);
-    }
-
-    return JSON.stringify({ ...parsed, input: fullInput });
-  } catch {
-    return base;
-  }
-}
 
 function sendWebSocketProxyError(ws: { send(data: string): void; close(code?: number, reason?: string): void }, message: string) {
   try {
@@ -242,10 +216,11 @@ async function handleWebSocketLimit(
   try {
     ws.data.suppressNextClose = true;
     try { ws.data.upstream?.close(1000, "switching account"); } catch {}
+    ws.data.upstream = undefined;
 
     const upstreamUrl = ws.data.upstreamUrl;
-    if (!upstreamUrl || !ws.data.firstMessage) {
-      sendWebSocketProxyError(ws, "Current WebSocket request cannot be replayed after limit.");
+    if (!upstreamUrl) {
+      sendWebSocketProxyError(ws, "Cannot switch account for this request.");
       return;
     }
 
@@ -273,16 +248,17 @@ async function handleWebSocketLimit(
       broadcastLog({ type: "account_switched", from, to: candidate.email, reason: "rate_limit", timestamp: Date.now() });
       notifyAccountsChanged();
 
-      const messageToSend = ws.data.conversationBuffer && ws.data.conversationBuffer.length > 0
-        ? rebuildFirstMessageWithContext(ws.data.firstMessage!, ws.data.conversationBuffer)
-        : ws.data.firstMessage!;
-      // Reset buffer to the flattened state so subsequent switches stay correct
+      // Signal Codex to retry on the same WebSocket — it will resend with full input[]
+      // using error code "connection_reset" which maps to ApiError::Retryable in Codex
       try {
-        const parsed = JSON.parse(typeof messageToSend === "string" ? messageToSend : compactWebSocketPayload(messageToSend));
-        ws.data.conversationBuffer = [{ input: parsed.input ?? [] }];
-        ws.data.firstMessage = messageToSend as any;
+        ws.send(JSON.stringify({
+          type: "response.failed",
+          response: {
+            status: "failed",
+            error: { code: "connection_reset", message: "Upstream account switched, please retry." },
+          },
+        }));
       } catch {}
-      openCodexUpstream(ws, messageToSend);
       return;
     }
 
@@ -320,15 +296,6 @@ function openCodexUpstream(
         return;
       }
       ws.send(data);
-      if (typeof data === "string" && ws.data.conversationBuffer && data.includes('"response.completed"')) {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed?.type === "response.completed" && Array.isArray(parsed?.response?.output)) {
-            const lastTurn = ws.data.conversationBuffer[ws.data.conversationBuffer.length - 1];
-            if (lastTurn) lastTurn.output = parsed.response.output;
-          }
-        } catch {}
-      }
     } catch {}
   });
   upstream.addEventListener("close", (ev) => {
@@ -658,26 +625,12 @@ Bun.serve<WsData>({
 
         ws.data.firstMessage = message as any;
         ws.data.isNewPrompt = isNewPrompt;
-        if (typeof message === "string") {
-          try {
-            const data = JSON.parse(message);
-            ws.data.conversationBuffer = [{ input: data.input ?? [] }];
-          } catch {}
-        }
         openCodexUpstream(ws as any, message as any);
         return;
       }
 
       // Subsequent messages: capture tool outputs then forward
       if (ws.data.upstream.readyState === WebSocket.OPEN) {
-        if (typeof message === "string" && ws.data.conversationBuffer) {
-          try {
-            const data = JSON.parse(message as string);
-            if (Array.isArray(data?.input)) {
-              ws.data.conversationBuffer.push({ input: data.input });
-            }
-          } catch {}
-        }
         ws.data.upstream.send(message);
       }
     },
