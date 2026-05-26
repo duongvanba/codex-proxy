@@ -145,6 +145,28 @@ temporary callback server on `http://localhost:1455/auth/callback`, imports the
 returned tokens into `accounts.json`, then closes the callback port. The
 callback server auto-closes after 5 minutes if login is not completed.
 
+## Access control (JWT gate)
+
+All requests to `/v1/*` and `/backend-api/*` require a valid OpenAI OAuth JWT
+in the `Authorization: Bearer <token>` header. Requests are rejected unless:
+
+- The signature verifies against OpenAI's public JWKS
+  (`https://auth.openai.com/.well-known/jwks.json`)
+- `iss` equals `https://auth.openai.com`
+- `exp` is in the future, `nbf` is in the past
+- `alg` is `RS256` (never `none`)
+- `chatgpt_plan_type` is one of `plus`, `pro`, `max`
+
+The gate fetches the JWKS once per hour and caches imported `CryptoKey`
+objects in memory; concurrent requests share a single in-flight fetch.
+
+Management endpoints (`/livequery/*`, `/health`, web UI) are not gated. They
+are intended to be reached locally or over a trusted LAN.
+
+To grant access to another machine: copy a valid Codex OAuth token into that
+machine's request headers, or point its Codex client at this proxy via
+`openai_base_url = "http://<this-host>:<port>/v1"`.
+
 ## Troubleshooting
 
 - Port is busy: set `PROXY_PORT` to another port or stop the old process.
@@ -156,3 +178,7 @@ callback server auto-closes after 5 minutes if login is not completed.
   OpenAI quota refresh is still running or timed out.
 - Token expired: log in again from the Web UI, or let the watcher import a fresh
   token from `~/.codex/auth.json`.
+- `401 Plan "<x>" not allowed`: the client JWT has a plan type outside
+  `plus|pro|max`. See [Access control](#access-control-jwt-gate).
+- `401 Signature verification failed`: client token was tampered with or signed
+  by a different issuer; only OpenAI-issued tokens are accepted.
