@@ -1,4 +1,5 @@
 import { proxyRequest, buildWebSocketProxyData } from "./src/server/proxy";
+import { validateClientJwt } from "./src/server/auth-gate";
 import {
   getAccounts,
   isUsableAccount,
@@ -436,6 +437,19 @@ Bun.serve<WsData>({
         publicBaseUrl: url.origin,
         restartCodex,
       });
+    }
+
+    // ── JWT gate for ALL proxied routes (must run BEFORE any /v1/* handler) ──
+    if (path.startsWith("/v1/") || path.startsWith("/backend-api/")) {
+      const gate = await validateClientJwt(req);
+      if (!gate.ok) {
+        console.warn(`[gate] DENY ${req.method} ${path} → ${gate.status} ${gate.error}`);
+        return Response.json(
+          { error: { message: gate.error, type: "forbidden" } },
+          { status: gate.status }
+        );
+      }
+      console.log(`[gate] ALLOW ${req.method} ${path} ← ${gate.email} (${gate.planType})`);
     }
 
     // ── Stub /v1/models — ChatGPT OAuth tokens lack api.model.read scope ─────
