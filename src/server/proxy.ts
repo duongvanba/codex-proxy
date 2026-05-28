@@ -4,6 +4,7 @@ import {
   markRateLimited,
   markExpired,
   recordRequest,
+  refreshAccountAccessToken,
   setSelectedAccount,
 } from "./accounts";
 import { readAuth } from "./watcher";
@@ -509,6 +510,20 @@ async function proxyRequestInner(
             body: body ?? undefined,
           });
           return proxyRequestInner(retryReq, meta, onStreamError, onStreamUsage, onAccountSwitch, retries + 1);
+        }
+
+        const refreshed = await refreshAccountAccessToken(account, { force: true });
+        if (refreshed.ok && refreshed.refreshed) {
+          console.log(`[proxy] refreshed access token for ${account.email}; retrying request`);
+          const retryReq = new Request(req.url, {
+            method: req.method,
+            headers: req.headers,
+            body: body ?? undefined,
+          });
+          return proxyRequestInner(retryReq, meta, onStreamError, onStreamUsage, onAccountSwitch, retries + 1);
+        }
+        if (!refreshed.ok) {
+          console.error(`[proxy] token refresh failed for ${account.email}: ${refreshed.error}`);
         }
       }
 

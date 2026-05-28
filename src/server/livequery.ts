@@ -11,7 +11,7 @@ import {
 } from "./accounts";
 import {
   cancelLoginFlow,
-  importCallbackUrl,
+  importAccountInput,
   isLoginInProgress,
   startLoginFlow,
 } from "./login-flow";
@@ -373,9 +373,12 @@ async function handleAction(action: string, ctx: LivequeryContext, openaiBaseUrl
   }
 
   if (action === "import-callback") {
-    const callbackUrl = typeof payload.callbackUrl === "string" ? payload.callbackUrl.trim() : "";
-    if (!callbackUrl) return error("BAD_REQUEST", "Missing callbackUrl");
-    const result = await importCallbackUrl(callbackUrl);
+    const importInput =
+      typeof payload.importInput === "string" ? payload.importInput.trim() :
+      typeof payload.callbackUrl === "string" ? payload.callbackUrl.trim() :
+      "";
+    if (!importInput) return error("BAD_REQUEST", "Missing import input");
+    const result = await importAccountInput(importInput);
     if (!result.ok) {
       const message = result.error ?? "Import callback failed";
       logEvent("login_import_error", message);

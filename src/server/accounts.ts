@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { Account, CodexUsage, UsageWindow } from "./types";
-import { CODEX_USAGE_URL } from "./libs/chatgpt";
+import { CODEX_USAGE_URL, decodeTokenInfo } from "./libs/chatgpt";
+import { OPENAI_CLIENT_ID, OPENAI_TOKEN_URL } from "./oauth";
 
 const ACCOUNTS_FILE = join(import.meta.dir, "..", "..", "accounts.json");
 const ACCOUNT_STATE_FILE = join(import.meta.dir, "..", "..", "account-state.json");
@@ -10,6 +11,7 @@ const DEFAULT_WEEKLY_LIMIT = readLimit("CODEX_WEEKLY_LIMIT", 500);
 const CODEX_USAGE_TTL_MS = readLimit("CODEX_USAGE_TTL_SECONDS", 60) * 1000;
 const CODEX_USAGE_CONCURRENCY = readLimit("CODEX_USAGE_CONCURRENCY", 3);
 const CODEX_USAGE_TIMEOUT_MS = readLimit("CODEX_USAGE_TIMEOUT_MS", 3000);
+const TOKEN_REFRESH_MIN_TTL_MS = readLimit("TOKEN_REFRESH_MIN_TTL_SECONDS", 300) * 1000;
 
 type PersistedAccount = Pick<
   Account,
@@ -29,6 +31,11 @@ type AccountRuntimeState = {
 };
 
 type AccountStateFile = Record<string, AccountRuntimeState>;
+type RefreshResult =
+  | { ok: true; account: Account; refreshed: boolean }
+  | { ok: false; error: string; status?: number };
+
+const refreshInFlight = new Map<string, Promise<RefreshResult>>();
 
 function readLimit(envName: string, fallback: number): number {
   const raw = process.env[envName];
@@ -99,6 +106,21 @@ function decodeJwtPayload(token: string): Record<string, any> {
   } catch {
     return {};
   }
+}
+
+function tokenExpiresWithin(token: string, minTtlMs: number): boolean {
+  const payload = decodeJwtPayload(token);
+  if (!payload.exp) return false;
+  return Number(payload.exp) * 1000 - Date.now() <= minTtlMs;
+}
+
+function copyAccountTokens(target: Account, source: Account) {
+  target.accessToken = source.accessToken;
+  target.refreshToken = source.refreshToken;
+  target.idToken = source.idToken;
+  target.accountId = source.accountId;
+  target.status = source.status;
+  target.rateLimitUntil = source.rateLimitUntil;
 }
 
 function loadAccounts(): Account[] {
@@ -200,6 +222,70 @@ function usageErrorMessage(status: number, text: string): string {
   }
 }
 
+async function refreshAccountAccessTokenInner(account: Account): Promise<RefreshResult> {
+  const accounts = loadAccounts();
+  const persisted = accounts.find((a) => a.id === account.id || a.accountId === account.accountId || a.email === account.email);
+  const refreshToken = persisted?.refreshToken || account.refreshToken;
+  if (!refreshToken) return { ok: true, account: persisted ?? account, refreshed: false };
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: OPENAI_CLIENT_ID,
+  });
+
+  let res: Response;
+  try {
+    res = await fetch(OPENAI_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const text = await res.text();
+  if (!res.ok) return { ok: false, status: res.status, error: usageErrorMessage(res.status, text) };
+
+  let tokens: Record<string, any>;
+  try {
+    tokens = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "Refresh token response was not valid JSON" };
+  }
+
+  if (!tokens.access_token) return { ok: false, error: "Refresh token response did not include access_token" };
+
+  tokens.refresh_token = tokens.refresh_token ?? refreshToken;
+  tokens.account_id = tokens.account_id ?? persisted?.accountId ?? account.accountId;
+
+  const updated = importFromTokens(tokens);
+  if (!updated) return { ok: false, error: "Could not import refreshed access token" };
+  return { ok: true, account: updated, refreshed: true };
+}
+
+export async function refreshAccountAccessToken(
+  account: Account,
+  options: { force?: boolean; minTtlMs?: number } = {}
+): Promise<RefreshResult> {
+  const minTtlMs = options.minTtlMs ?? TOKEN_REFRESH_MIN_TTL_MS;
+  if (!options.force && !tokenExpiresWithin(account.accessToken, minTtlMs)) {
+    return { ok: true, account, refreshed: false };
+  }
+
+  const key = account.id || account.accountId || account.email;
+  let pending = refreshInFlight.get(key);
+  if (!pending) {
+    pending = refreshAccountAccessTokenInner(account).finally(() => refreshInFlight.delete(key));
+    refreshInFlight.set(key, pending);
+  }
+
+  const result = await pending;
+  if (result.ok) copyAccountTokens(account, result.account);
+  return result;
+}
+
 export async function refreshCodexUsageForAccounts(force = false): Promise<void> {
   const accounts = loadAccounts();
   const now = Date.now();
@@ -214,9 +300,30 @@ export async function refreshCodexUsageForAccounts(force = false): Promise<void>
 
   async function refreshOne(account: Account) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
-      const res = await fetch(CODEX_USAGE_URL, {
+      let refreshedBeforeQuota = false;
+      const refresh = await refreshAccountAccessToken(account, { minTtlMs: TOKEN_REFRESH_MIN_TTL_MS });
+      if (!refresh.ok) {
+        const info = decodeTokenInfo(account.accessToken);
+        if (info.isExpired) {
+          account.status = "expired";
+          account.codexUsage = {
+            fetchedAt: now,
+            allowed: false,
+            limitReached: false,
+            error: `Token refresh failed before quota fetch: ${refresh.error}`,
+          };
+          changed = true;
+          return;
+        }
+      } else if (refresh.refreshed) {
+        refreshedBeforeQuota = true;
+        changed = true;
+      }
+
+      async function fetchQuota() {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
+        return fetch(CODEX_USAGE_URL, {
           signal: controller.signal,
           headers: {
             accept: "*/*",
@@ -230,9 +337,45 @@ export async function refreshCodexUsageForAccounts(force = false): Promise<void>
           },
         })
         .finally(() => clearTimeout(timeout));
+      }
+
+      let res = await fetchQuota();
       const text = await res.text();
 
       if (!res.ok) {
+        if (res.status === 401 && !refreshedBeforeQuota) {
+          const retryRefresh = await refreshAccountAccessToken(account, { force: true });
+          if (retryRefresh.ok && retryRefresh.refreshed) {
+            changed = true;
+            res = await fetchQuota();
+            const retryText = await res.text();
+            if (res.ok) {
+              const body = JSON.parse(retryText);
+              const rateLimit = body.rate_limit;
+              account.codexUsage = {
+                fetchedAt: now,
+                allowed: Boolean(rateLimit?.allowed),
+                limitReached: Boolean(rateLimit?.limit_reached),
+                primaryWindow: normalizeUsageWindow(rateLimit?.primary_window),
+                secondaryWindow: normalizeUsageWindow(rateLimit?.secondary_window),
+              };
+              if (body.plan_type && !account.chatgptPlanType) account.chatgptPlanType = body.plan_type;
+              if (account.status === "expired") account.status = "active";
+              changed = true;
+              return;
+            }
+            account.codexUsage = {
+              fetchedAt: now,
+              allowed: false,
+              limitReached: false,
+              error: usageErrorMessage(res.status, retryText),
+            };
+            if (res.status === 401) account.status = "expired";
+            changed = true;
+            return;
+          }
+        }
+
         account.codexUsage = {
           fetchedAt: now,
           allowed: false,

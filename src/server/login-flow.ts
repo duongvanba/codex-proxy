@@ -1,12 +1,11 @@
 import { randomBytes, createHash } from "crypto";
 import { importFromTokens } from "./accounts";
 import { logEvent } from "./logger";
+import { OPENAI_CLIENT_ID, OPENAI_TOKEN_URL } from "./oauth";
 
 const CALLBACK_PORT = 1455;
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/auth/callback`;
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
 
 let activeServer: ReturnType<typeof Bun.serve> | null = null;
 let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -86,11 +85,11 @@ async function exchangeCodeForAccount(
     const tokenBody = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      client_id: CLIENT_ID,
+      client_id: OPENAI_CLIENT_ID,
       redirect_uri: REDIRECT_URI,
       code_verifier: verifier,
     });
-    const tokenResp = await fetch(TOKEN_URL, {
+    const tokenResp = await fetch(OPENAI_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: tokenBody,
@@ -181,6 +180,70 @@ export async function importCallbackUrl(callbackUrl: string): Promise<{
   );
 }
 
+export function sessionJsonToTokens(input: string): { ok: true; tokens: Record<string, any> } | { ok: false; error: string } {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return { ok: false, error: "Invalid JSON account export" };
+  }
+
+  const accessToken =
+    typeof parsed.accessToken === "string" ? parsed.accessToken :
+    typeof parsed.access_token === "string" ? parsed.access_token :
+    typeof parsed.tokens?.access_token === "string" ? parsed.tokens.access_token :
+    "";
+
+  if (!accessToken) return { ok: false, error: "JSON does not include accessToken" };
+
+  const refreshToken =
+    typeof parsed.refreshToken === "string" ? parsed.refreshToken :
+    typeof parsed.refresh_token === "string" ? parsed.refresh_token :
+    typeof parsed.tokens?.refresh_token === "string" ? parsed.tokens.refresh_token :
+    "";
+
+  const idToken =
+    typeof parsed.idToken === "string" ? parsed.idToken :
+    typeof parsed.id_token === "string" ? parsed.id_token :
+    typeof parsed.tokens?.id_token === "string" ? parsed.tokens.id_token :
+    undefined;
+
+  const accountId =
+    typeof parsed.account?.id === "string" ? parsed.account.id :
+    typeof parsed.account_id === "string" ? parsed.account_id :
+    typeof parsed.tokens?.account_id === "string" ? parsed.tokens.account_id :
+    undefined;
+
+  return {
+    ok: true,
+    tokens: {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      id_token: idToken,
+      account_id: accountId,
+    },
+  };
+}
+
+export async function importAccountInput(input: string): Promise<{
+  ok: boolean;
+  email?: string;
+  error?: string;
+}> {
+  const value = input.trim();
+  if (!value) return { ok: false, error: "Missing import input" };
+
+  if (value.startsWith("{")) {
+    const converted = sessionJsonToTokens(value);
+    if (!converted.ok) return converted;
+    const account = importFromTokens(converted.tokens);
+    if (!account) return { ok: false, error: "Could not parse account from JSON accessToken" };
+    return { ok: true, email: account.email };
+  }
+
+  return importCallbackUrl(value);
+}
+
 export function startLoginFlow(
   onAccount: (email: string) => void,
   onError: (err: string) => void,
@@ -195,7 +258,7 @@ export function startLoginFlow(
 
   const params = new URLSearchParams({
     response_type: "code",
-    client_id: CLIENT_ID,
+    client_id: OPENAI_CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
     code_challenge: challenge,

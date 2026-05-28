@@ -82,10 +82,10 @@ export function Dashboard() {
   }
 
   async function importCallback() {
-    const callbackUrl = prompt("Paste OpenAI callback URL");
-    if (!callbackUrl) return;
+    const importInput = prompt("Paste OpenAI callback URL or account JSON");
+    if (!importInput) return;
     try {
-      await callAction("import-callback", { callbackUrl });
+      await callAction("import-callback", { importInput });
       setLoginInProgress(false);
       await accountsCollection.query({});
       setNotice({ type: "info", message: "Account imported." });
