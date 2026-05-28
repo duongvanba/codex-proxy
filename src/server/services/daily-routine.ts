@@ -1,5 +1,5 @@
 import { getAccounts, markExpired, markRateLimited } from "./accounts";
-import type { Account } from "./types";
+import type { Account } from "../schemas";
 
 const DEFAULT_TIME_ZONE = process.env.DAILY_ROUTINE_TIME_ZONE ?? "Asia/Ho_Chi_Minh";
 const DEFAULT_HOUR = readNumber("DAILY_ROUTINE_HOUR", 7);

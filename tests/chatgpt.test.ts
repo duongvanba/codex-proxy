@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import type { Account } from "../src/server/types";
+import type { Account } from "../src/server/schemas";
 import {
   isRateLimitText,
   isStreamFailureBody,

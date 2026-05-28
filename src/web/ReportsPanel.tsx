@@ -1,4 +1,5 @@
-import { type LivequeryDocument } from "@livequery/client";
+import { type LivequeryDocument, type LivequeryLoadingState } from "@livequery/client";
+import { BehaviorSubject } from "rxjs";
 import { useObservable } from "@livequery/react";
 import type { ReportDoc } from "./types";
 
@@ -11,7 +12,7 @@ function reportClass(report: ReportDoc) {
 }
 
 function ReportRow({ reportDoc }: { reportDoc: LivequeryDocument<ReportDoc> }) {
-  const report = useObservable(reportDoc, reportDoc.value);
+  const report = useObservable(reportDoc);
   const time = new Date(report.timestamp).toLocaleTimeString("en-US", { hour12: false });
   const title = report.type === "request"
     ? `${report.method ?? ""} ${report.path ?? ""}`
@@ -32,12 +33,12 @@ function ReportRow({ reportDoc }: { reportDoc: LivequeryDocument<ReportDoc> }) {
 
 export function ReportsPanel({
   reports,
-  reportsLoading,
+  reportsLoading$,
 }: {
   reports: LivequeryDocument<ReportDoc>[];
-  reportsLoading: unknown;
+  reportsLoading$: BehaviorSubject<LivequeryLoadingState | null>;
 }) {
-  const loading = Boolean(reportsLoading);
+  const loading = Boolean(useObservable(reportsLoading$));
   return (
     <section>
       <h2>Reports {loading && <span className="section-loading"><span className="inline-spinner" /> loading</span>}</h2>
@@ -46,7 +47,7 @@ export function ReportsPanel({
           ? <div className="empty"><span className="inline-spinner" /> Loading reports...</div>
           : reports.length === 0
             ? <div className="empty">No reports yet.</div>
-            : reports.slice(0, 200).map((reportDoc) => <ReportRow key={reportDoc.value.id} reportDoc={reportDoc} />)}
+            : reports.slice(0, 200).map((reportDoc) => <ReportRow key={reportDoc.getValue().id} reportDoc={reportDoc} />)}
       </div>
     </section>
   );

@@ -131,15 +131,26 @@ function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: bo
 export function AccountCard({
   accountDoc,
   now,
+  onOpen,
 }: {
   accountDoc: LivequeryDocument<AccountDoc>;
   now: number;
+  onOpen?: () => void;
 }) {
-  const account = useObservable(accountDoc, accountDoc.value);
+  const account = useObservable(accountDoc);
   const isUsing = Boolean(account.selected && !["rate_limited", "expired"].includes(account.status));
 
+  function handleContextMenu(e: React.MouseEvent) {
+    if (!onOpen) return;
+    e.preventDefault();
+    onOpen();
+  }
+
   return (
-    <div className={`account-card ${isUsing ? "selected" : account.status}`}>
+    <div
+      className={`account-card ${isUsing ? "selected" : account.status} ${onOpen ? "right-clickable" : ""}`}
+      onContextMenu={handleContextMenu}
+    >
       <div className="avatar">{(account.email || "?").charAt(0).toUpperCase()}</div>
       <div className="account-info">
         <div className="email">{account.email}</div>

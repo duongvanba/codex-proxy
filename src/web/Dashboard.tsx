@@ -1,4 +1,5 @@
-import { type LivequeryDocument } from "@livequery/client";
+import { type LivequeryDocument, type LivequeryLoadingState } from "@livequery/client";
+import { BehaviorSubject } from "rxjs";
 import { useAction, useCollection, useObservable } from "@livequery/react";
 import { useEffect, useState } from "react";
 import { AccountCard } from "./AccountCard";
@@ -6,13 +7,17 @@ import { ReportsPanel } from "./ReportsPanel";
 import { StatsGrid } from "./StatsGrid";
 import type { AccountDoc, Notice, ReportDoc } from "./types";
 
-export function Dashboard() {
+function AccountListEmpty({ loading$ }: { loading$: BehaviorSubject<LivequeryLoadingState | null> }) {
+  const loading = useObservable(loading$);
+  if (loading) return <div className="empty"><span className="inline-spinner" /> Loading accounts...</div>;
+  return <div className="empty">No accounts yet.</div>;
+}
+
+export function Dashboard({ onAccountClick }: { onAccountClick?: (accountId: string) => void }) {
   const accountsCollection = useCollection<AccountDoc>("accounts", { mode: "local-first", lazy: false });
   const reportsCollection = useCollection<ReportDoc>("reports", { mode: "local-first", lazy: false });
   const accountDocs = useObservable(accountsCollection.items, []);
   const reportDocs = useObservable(reportsCollection.items, []);
-  const accountsLoading = useObservable(accountsCollection.loading, null);
-  const reportsLoading = useObservable(reportsCollection.loading, null);
   const accountError = useObservable(accountsCollection.error, null);
   const reportError = useObservable(reportsCollection.error, null);
   const [loginInProgress, setLoginInProgress] = useState(false);
@@ -154,21 +159,20 @@ export function Dashboard() {
       <section>
         <h2>Accounts</h2>
         <div className="account-list">
-          {accounts.length === 0 && accountsLoading
-            ? <div className="empty"><span className="inline-spinner" /> Loading accounts...</div>
-            : accounts.length === 0
-              ? <div className="empty">No accounts yet.</div>
-              : accounts.map((accountDoc) => (
-                <AccountCard
-                  key={accountDoc.value.id}
-                  accountDoc={accountDoc}
-                  now={now}
-                />
-              ))}
+          {accounts.length === 0
+            ? <AccountListEmpty loading$={accountsCollection.loading} />
+            : accounts.map((accountDoc) => (
+              <AccountCard
+                key={accountDoc.getValue().id}
+                accountDoc={accountDoc}
+                now={now}
+                onOpen={() => onAccountClick?.(accountDoc.getValue().id)}
+              />
+            ))}
         </div>
       </section>
 
-      <ReportsPanel reports={reports} reportsLoading={reportsLoading} />
+      <ReportsPanel reports={reports} reportsLoading$={reportsCollection.loading} />
     </main>
   );
 }

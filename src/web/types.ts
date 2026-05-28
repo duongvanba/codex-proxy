@@ -50,3 +50,32 @@ export type Notice = {
   type: "error" | "info";
   message: string;
 };
+
+export type HostDoc = Doc<{
+  env_id: string;
+  display_name: string;
+  host_name: string;
+  online: boolean;
+  busy?: boolean;
+  account_id: string;
+}>;
+
+export type ChatDoc = Doc<{
+  title?: string;
+  status?: string;
+  environment_id?: string;
+  workspace_root?: string;
+  created_at?: string;
+  updated_at?: string;
+  account_id: string;
+}>;
+
+export type TurnDoc = Doc<{
+  type: string;
+  role: string;
+  input_items: unknown[];
+  output_items: unknown[];
+  status?: string;
+  account_id: string;
+  chat_id: string;
+}>;

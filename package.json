@@ -18,10 +18,12 @@
   },
   "dependencies": {
     "@livequery/client": "^2.0.136",
-    "@livequery/core": "^2.0.106",
-    "@livequery/react": "^2.0.136",
+    "@livequery/core": "2.0.107",
+    "@livequery/react": "2.0.137",
     "@livequery/rest": "^2.0.136",
+    "hono": "^4.12.23",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6"
+    "react-dom": "^19.2.6",
+    "rxjs": "^7.8.2"
   }
 }

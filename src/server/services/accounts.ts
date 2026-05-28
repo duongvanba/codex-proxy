@@ -1,11 +1,11 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
-import type { Account, CodexUsage, UsageWindow } from "./types";
-import { CODEX_USAGE_URL, decodeTokenInfo } from "./libs/chatgpt";
+import type { Account, CodexUsage, UsageWindow } from "../schemas";
+import { CODEX_USAGE_URL, decodeTokenInfo } from "../libs/chatgpt";
 import { OPENAI_CLIENT_ID, OPENAI_TOKEN_URL } from "./oauth";
 
-const ACCOUNTS_FILE = join(import.meta.dir, "..", "..", "accounts.json");
-const ACCOUNT_STATE_FILE = join(import.meta.dir, "..", "..", "account-state.json");
+const ACCOUNTS_FILE = join(import.meta.dir, "..", "..", "..", "accounts.json");
+const ACCOUNT_STATE_FILE = join(import.meta.dir, "..", "..", "..", "account-state.json");
 const DEFAULT_DAILY_LIMIT = readLimit("CODEX_DAILY_LIMIT", 100);
 const DEFAULT_WEEKLY_LIMIT = readLimit("CODEX_WEEKLY_LIMIT", 500);
 const CODEX_USAGE_TTL_MS = readLimit("CODEX_USAGE_TTL_SECONDS", 60) * 1000;

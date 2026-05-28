@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { sessionJsonToTokens } from "../src/server/login-flow";
-import { refreshAccountAccessToken } from "../src/server/accounts";
-import type { Account } from "../src/server/types";
+import { sessionJsonToTokens } from "../src/server/services/login-flow";
+import { refreshAccountAccessToken } from "../src/server/services/accounts";
+import type { Account } from "../src/server/schemas";
 
 function fakeJwt(payload: Record<string, unknown>) {
   return [

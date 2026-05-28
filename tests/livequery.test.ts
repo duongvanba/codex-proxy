@@ -3,9 +3,9 @@ import {
   collectionResponse,
   getLivequeryHealth,
   serializeAccount,
-} from "../src/server/livequery";
-import { nextDailyRoutineRunAt } from "../src/server/daily-routine";
-import type { Account } from "../src/server/types";
+} from "../src/server/services/livequery";
+import { nextDailyRoutineRunAt } from "../src/server/services/daily-routine";
+import type { Account } from "../src/server/schemas";
 
 function account(overrides: Partial<Account> = {}): Account {
   return {

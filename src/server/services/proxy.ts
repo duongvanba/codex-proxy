@@ -8,7 +8,7 @@ import {
   setSelectedAccount,
 } from "./accounts";
 import { readAuth } from "./watcher";
-import type { Account } from "./types";
+import type { Account } from "../schemas";
 import {
   CHATGPT_BASE,
   CODEX_RESPONSES_PATH,
@@ -20,9 +20,9 @@ import {
   isRateLimitText,
   isStreamFailureBody,
   isSseSuccessBlock,
-} from "./libs/chatgpt";
+} from "../libs/chatgpt";
 
-export type { TokenUsage } from "./libs/chatgpt";
+export type { TokenUsage } from "../libs/chatgpt";
 
 // Route based on path prefix
 type Route = { prefix: string; target: string; rewrite?: (pathname: string) => string };

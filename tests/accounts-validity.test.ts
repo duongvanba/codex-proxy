@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "fs";
 import { join } from "path";
 import { decodeTokenInfo } from "../src/server/libs/chatgpt";
-import { getAccounts, refreshCodexUsageForAccounts } from "../src/server/accounts";
+import { getAccounts, refreshCodexUsageForAccounts } from "../src/server/services/accounts";
 
 const ACCOUNTS_PATH = join(import.meta.dir, "..", "accounts.json");
 
