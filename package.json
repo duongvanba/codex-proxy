@@ -1,29 +1,21 @@
 {
-  "name": "codex-proxy",
-  "module": "index.ts",
+  "name": "codex",
   "type": "module",
   "private": true,
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "start": "bun run index.ts",
-    "dev": "bun --watch run index.ts",
-    "test": "bun test"
+    "dev":          "concurrently \"bun run dev:server\" \"bun run dev:web\"",
+    "dev:server":   "bun --watch apps/honojs/index.ts",
+    "dev:web":      "bun run --cwd apps/remix-v2 dev",
+    "start:server": "bun apps/honojs/index.ts",
+    "build:web":    "bun run --cwd apps/remix-v2 build",
+    "build:types":  "tsc --build packages/types",
+    "typecheck":    "tsc --build",
+    "test":         "bun test apps/honojs"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/react": "^19.2.15",
-    "@types/react-dom": "^19.2.3"
-  },
-  "peerDependencies": {
+    "concurrently": "^9.0.0",
     "typescript": "^5"
-  },
-  "dependencies": {
-    "@livequery/client": "^2.0.136",
-    "@livequery/core": "2.0.107",
-    "@livequery/react": "2.0.137",
-    "@livequery/rest": "^2.0.136",
-    "hono": "^4.12.23",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
-    "rxjs": "^7.8.2"
   }
 }
