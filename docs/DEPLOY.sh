@@ -7,93 +7,84 @@
 #
 # Requirements:
 #   - SSH access to truenas_admin@192.168.2.4
-#   - Docker available on TrueNAS (sudo)
-#   - Dockge running at http://192.168.2.4:31000
+#   - Docker running on TrueNAS (via sudo)
+#   - Dockge at http://192.168.2.4:31000
+#   - Container already created (first-time setup below)
 #
-# What this script does:
-#   1. Build Docker image locally
-#   2. Save + transfer image to TrueNAS
-#   3. Create Dockge stack (docker compose)
-#   4. Start the stack
+# Architecture:
+#   - Image  : oven/bun:1.3 (no custom build needed)
+#   - Runtime: dist/server.js mounted from host
+#   - Data   : accounts.json, logs/ in /mnt/d2/codex-proxy-data/
+#   - Port   : 9876 → 8000 (container)
 # =============================================================================
 
 set -euo pipefail
 
 TRUENAS_HOST="truenas_admin@192.168.2.4"
-IMAGE_NAME="codex-proxy"
-IMAGE_TAG="latest"
-APP_PORT=8000
-DOCKGE_STACKS_DIR="/mnt/d2/dockge/data"
-STACK_NAME="codex-proxy"
-DATA_DIR="/mnt/d2/${STACK_NAME}/data"
+DIST_REMOTE="/mnt/d2/codex-proxy-data/dist"
 
 echo "=== Codex Proxy — Deploy to TrueNAS ==="
-echo "  Target : ${TRUENAS_HOST}"
-echo "  Port   : ${APP_PORT}"
-echo "  Stack  : ${DOCKGE_STACKS_DIR}/${STACK_NAME}"
-echo ""
 
-# ── Step 1: Build Docker image ─────────────────────────────────────────────────
-echo "[1/4] Building Docker image..."
-docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
-echo "      ✓ Image built: ${IMAGE_NAME}:${IMAGE_TAG}"
+# ── Step 1: Build ──────────────────────────────────────────────────────────────
+echo "[1/3] Building..."
+bun run build
+echo "      ✓ dist/server.js ($(du -sh dist/server.js | cut -f1))"
 
-# ── Step 2: Transfer image to TrueNAS ─────────────────────────────────────────
-echo "[2/4] Transferring image to TrueNAS..."
-docker save "${IMAGE_NAME}:${IMAGE_TAG}" | \
-  ssh "${TRUENAS_HOST}" "sudo docker load"
-echo "      ✓ Image loaded on TrueNAS"
+# ── Step 2: Rsync ──────────────────────────────────────────────────────────────
+echo "[2/3] Syncing to TrueNAS..."
+rsync -az dist/server.js "${TRUENAS_HOST}:${DIST_REMOTE}/"
+echo "      ✓ Synced"
 
-# ── Step 3: Create Dockge stack ────────────────────────────────────────────────
-echo "[3/4] Creating Dockge stack..."
-ssh "${TRUENAS_HOST}" "
-  sudo mkdir -p ${DOCKGE_STACKS_DIR}/${STACK_NAME}
-  sudo mkdir -p ${DATA_DIR}
-  sudo tee ${DOCKGE_STACKS_DIR}/${STACK_NAME}/compose.yaml > /dev/null << 'COMPOSE'
-services:
-  codex-proxy:
-    image: codex-proxy:latest
-    container_name: ${STACK_NAME}
-    restart: unless-stopped
-    ports:
-      - '${APP_PORT}:8000'
-    volumes:
-      - ${DATA_DIR}:/app/data
-    environment:
-      - PROXY_PORT=8000
-      - STATIC_DIR=/app/dist/public
-      - DATA_DIR=/app/data
-    healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:8000/health']
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-COMPOSE
-  echo '✓ compose.yaml created'
-"
-echo "      ✓ Stack created at ${DOCKGE_STACKS_DIR}/${STACK_NAME}/compose.yaml"
-
-# ── Step 4: Start stack ────────────────────────────────────────────────────────
-echo "[4/4] Starting stack..."
-ssh "${TRUENAS_HOST}" "
-  cd ${DOCKGE_STACKS_DIR}/${STACK_NAME}
-  sudo docker compose up -d
-"
-echo "      ✓ Stack started"
+# ── Step 3: Restart ────────────────────────────────────────────────────────────
+echo "[3/3] Restarting container..."
+ssh "${TRUENAS_HOST}" "sudo docker restart codex-proxy"
+sleep 3
 
 # ── Verify ─────────────────────────────────────────────────────────────────────
+RESULT=$(ssh "${TRUENAS_HOST}" "sudo docker exec codex-proxy bun -e \
+  'const r=await fetch(\"http://localhost:8000/health\");const d=await r.json();
+   console.log(\"accounts:\",d.accountCount,\"active:\",d.activeAccountCount)' 2>/dev/null")
 echo ""
-echo "=== Verifying deployment ==="
-sleep 3
-STATUS=$(ssh "${TRUENAS_HOST}" "curl -sf http://localhost:${APP_PORT}/health 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(\"accounts:\", d[\"accountCount\"])' 2>/dev/null || echo 'not ready yet'")
-echo "  Health: ${STATUS}"
-echo ""
-echo "=== Done ==="
-echo "  App    : http://192.168.2.4:${APP_PORT}"
-echo "  Dockge : http://192.168.2.4:31000"
-echo "  Data   : ${DATA_DIR}"
-echo ""
-echo "Next steps:"
-echo "  1. Copy accounts.json to ${DATA_DIR}/accounts.json on TrueNAS"
-echo "  2. Restart stack: ssh ${TRUENAS_HOST} 'cd ${DOCKGE_STACKS_DIR}/${STACK_NAME} && sudo docker compose restart'"
+echo "=== Done === $RESULT"
+echo "  App : http://192.168.2.4:9876"
+
+# =============================================================================
+# FIRST-TIME SETUP (run once manually)
+# =============================================================================
+# ssh truenas_admin@192.168.2.4
+#
+# # Create directories
+# sudo mkdir -p /mnt/d2/codex-proxy-data/dist
+# sudo mkdir -p /mnt/d2/dockge/data/codex-proxy
+#
+# # Create compose stack
+# sudo tee /mnt/d2/dockge/data/codex-proxy/compose.yaml << 'EOF'
+# services:
+#   codex-proxy:
+#     image: oven/bun:1.3
+#     container_name: codex-proxy
+#     restart: unless-stopped
+#     working_dir: /app
+#     command: bun run dist/server.js
+#     ports:
+#       - '9876:8000'
+#     volumes:
+#       - /mnt/d2/codex-proxy-data/dist:/app/dist
+#       - /mnt/d2/codex-proxy-data:/app/data
+#     environment:
+#       - PROXY_PORT=8000
+#       - STATIC_DIR=/app/dist/public
+#       - DATA_DIR=/app/data
+#     healthcheck:
+#       test: ['CMD-SHELL', 'curl -sf http://localhost:8000/health || exit 1']
+#       interval: 30s
+#       timeout: 5s
+#       retries: 3
+#       start_period: 10s
+# EOF
+#
+# # Copy accounts.json
+# # rsync -az accounts.json truenas_admin@192.168.2.4:/mnt/d2/codex-proxy-data/
+#
+# # Start
+# cd /mnt/d2/dockge/data/codex-proxy && sudo docker compose up -d

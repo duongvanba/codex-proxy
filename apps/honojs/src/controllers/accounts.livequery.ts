@@ -129,8 +129,6 @@ export class AccountsController extends Hono {
   }
 
   private startLogin(): Response {
-    // Login + enroll dùng chung port 1455 → đóng mọi callback server enroll còn sót để login bind được.
-    this.enrollment.closeCallbackServers();
     const sendLoginEvent = (entry: object) => {
       this.store.addReport({ ...(entry as Record<string, unknown>), timestamp: Date.now(), type: String((entry as Record<string, unknown>).type ?? "login_event") });
     };
@@ -139,7 +137,7 @@ export class AccountsController extends Hono {
       (err) => { this.logger.logEvent("login_error", err); this.store.addReport({ type: "login_error", error: err, timestamp: Date.now() }); },
       sendLoginEvent
     );
-    if (!result.ok) return error("CONFLICT", result.error, 409);
+    if (!result.ok) return error("INTERNAL_ERROR", result.error, 500);
     this.logger.logEvent("login_started", "callback port=1455");
     this.store.addReport({ type: "login_started", timestamp: Date.now() });
     return json({ data: { ok: true, authorize_url: result.authorizeUrl } });

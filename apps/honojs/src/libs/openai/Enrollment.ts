@@ -3,12 +3,10 @@
  *
  * Flow:
  *  1. POST enroll/start → get challenge object + client_id (body: {})
- *  2. Start local callback server on port 1455 or 1457
- *  3. Build OAuth URL (prompt=login, scope=codex.remote_control.enroll)
- *     redirect_uri = http://localhost:{port}/auth/callback
- *  4. User logs in, browser redirects to localhost:{port}/auth/callback?code=...
- *  5. Local server exchanges code for step-up token, calls enroll/finish
- *  6. Local server serves success page with window.opener.postMessage
+ *  2. Build OAuth URL (prompt=login, scope=codex.remote_control.enroll)
+ *     redirect_uri = {PUBLIC_BASE_URL}/enroll/callback  (proxy tự nhận)
+ *  3. User logs in, browser redirects to proxy /enroll/callback?code=...&state=...
+ *  4. Proxy exchanges code for step-up token, calls enroll/finish
  */
 
 import { ChatGPTClient, CHATGPT_BASE } from "../chatgpt";
@@ -18,8 +16,7 @@ import type { AccountsService } from "../../services/accounts";
 const HOME = process.env.HOME ?? "";
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_ISSUER = "https://auth.openai.com";
-const CALLBACK_PATH = "/auth/callback";
-const CALLBACK_PORTS = [1455, 1457];
+const CALLBACK_REDIRECT_URI = "http://localhost:1455/auth/callback";
 
 const ENROLLMENTS_FILE = `${HOME}/.codex/.codex-proxy-enrollments.json`;
 const PENDING_FILE = `${HOME}/.codex/.codex-proxy-pending.json`;
@@ -90,9 +87,6 @@ export class EnrollmentService {
   private enrollmentsLoaded = false;
   private pendingLoaded = false;
 
-  // Active local callback servers keyed by port
-  private activeCallbackServers = new Map<number, ReturnType<typeof Bun.serve>>();
-
   // ─── Persistence ─────────────────────────────────────────────────────────────
 
   private async loadEnrollments(): Promise<void> {
@@ -143,89 +137,6 @@ export class EnrollmentService {
     await Bun.write(PENDING_FILE, JSON.stringify(data, null, 2));
   }
 
-  // ─── Local callback server ────────────────────────────────────────────────────
-
-  /** Đóng MỌI callback server enroll đang chạy (giải phóng port 1455/1457). Dùng khi huỷ/xoá
-   *  enroll, hoặc nhường port cho login (login + enroll dùng chung port). */
-  closeCallbackServers(): void {
-    for (const [port, server] of this.activeCallbackServers) {
-      try { server.stop(true); } catch { /* ignore */ }
-      this.activeCallbackServers.delete(port);
-    }
-  }
-
-  private startCallbackServer(): { port: number; close: () => void } {
-    for (const port of CALLBACK_PORTS) {
-      if (this.activeCallbackServers.has(port)) {
-        // Already running, reuse it
-        return { port, close: () => {} };
-      }
-      try {
-        const server = Bun.serve({
-          port,
-          fetch: async (req) => {
-            const url = new URL(req.url);
-            if (url.pathname !== CALLBACK_PATH) {
-              return new Response("Not Found", { status: 404 });
-            }
-
-            const code = url.searchParams.get("code");
-            const state = url.searchParams.get("state"); // pendingId
-            const oauthError = url.searchParams.get("error");
-
-            if (oauthError) {
-              const desc = url.searchParams.get("error_description") ?? "";
-              return new Response(
-                `<html><body><h2>Enrollment failed: ${oauthError}</h2><p>${desc}</p><script>window.close();</script></body></html>`,
-                { headers: { "Content-Type": "text/html" } }
-              );
-            }
-
-            if (!code || !state) {
-              return new Response(
-                `<html><body><h2>Missing code or state</h2></body></html>`,
-                { status: 400, headers: { "Content-Type": "text/html" } }
-              );
-            }
-
-            try {
-              await this.completeEnrollmentWithCode(state, code);
-              // Stop server after successful enrollment
-              setTimeout(() => {
-                this.activeCallbackServers.delete(port);
-                try { server.stop(true); } catch {}
-              }, 3000);
-              return new Response(
-                `<html><body>
-                  <h2>Remote Control enrollment successful!</h2>
-                  <p>You can close this tab.</p>
-                  <script>
-                    window.opener?.postMessage({ type: "enroll-success", pendingId: "${state}" }, "*");
-                    setTimeout(() => window.close(), 1500);
-                  </script>
-                </body></html>`,
-                { headers: { "Content-Type": "text/html" } }
-              );
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              console.error(`[enroll] callback error: ${msg}`);
-              return new Response(
-                `<html><body><h2>Enrollment failed</h2><pre>${msg}</pre></body></html>`,
-                { status: 500, headers: { "Content-Type": "text/html" } }
-              );
-            }
-          },
-        });
-        this.activeCallbackServers.set(port, server);
-        console.log(`[enroll] callback server listening on port ${port}`);
-        return { port, close: () => { this.activeCallbackServers.delete(port); try { server.stop(true); } catch {} } };
-      } catch {
-        // Port in use, try next
-      }
-    }
-    throw new Error(`Could not bind callback server (tried ports: ${CALLBACK_PORTS.join(", ")})`);
-  }
-
   // ─── Crypto helpers ───────────────────────────────────────────────────────────
 
   private rawToDer(rawSig: Uint8Array): Uint8Array {
@@ -268,16 +179,6 @@ export class EnrollmentService {
 
   // ─── Public API ───────────────────────────────────────────────────────────────
 
-  async restartPendingCallbackListeners(): Promise<void> {
-    await this.loadPending();
-    if (this.pendingEnrollments.size === 0) return;
-    try {
-      this.startCallbackServer();
-    } catch (e) {
-      console.warn(`[enroll] Could not restart callback listener: ${e}`);
-    }
-  }
-
   async getEnrollment(accountId: string): Promise<EnrollmentEntry | undefined> {
     await this.loadEnrollments();
     return this.completedEnrollments.get(accountId);
@@ -315,9 +216,7 @@ export class EnrollmentService {
     };
     const { client_id, device_key_challenge: challenge } = startData;
 
-    // Start local callback server on port 1455 or 1457 (same ports Codex desktop uses)
-    const { port } = this.startCallbackServer();
-    const redirectUri = `http://localhost:${port}${CALLBACK_PATH}`;
+    const redirectUri = CALLBACK_REDIRECT_URI;
 
     // PKCE
     const { verifier: codeVerifier, challenge: codeChallenge } = await this.pkceChallenge();
@@ -504,7 +403,6 @@ export class EnrollmentService {
     // Xoá cả pending của account (nếu đang enrolling dở) rồi báo đổi → enrollStatus "none".
     for (const [id, p] of this.pendingEnrollments) if (p.accountId === accountId) this.pendingEnrollments.delete(id);
     await this.savePending();
-    this.closeCallbackServers(); // tránh rò rỉ callback server giữ port 1455
     this.emitChange(accountId);
   }
 

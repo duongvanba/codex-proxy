@@ -70,17 +70,22 @@ export type ActionEnv = {
 
 // ─── Free helpers ────────────────────────────────────────────────────────────
 
+/** Tính lại resetAfterSeconds từ resetAt (absolute Unix seconds) tại thời điểm gọi. */
+function recalcWindow(win: NonNullable<Account["codexUsage"]>["primaryWindow"], pending: boolean) {
+  if (!win) return undefined;
+  if (pending) return { ...win, resetAfterSeconds: -1 };
+  const nowSec = Math.floor(Date.now() / 1000);
+  return { ...win, resetAfterSeconds: Math.max(0, win.resetAt - nowSec) };
+}
+
 export function serializeAccount(account: Account, options: { pendingQuotaTimers?: boolean } = {}): AccountDocument {
   const { accessToken: _accessToken, refreshToken: _refreshToken, idToken: _idToken, ...safeAccount } = account;
-  if (options.pendingQuotaTimers && safeAccount.codexUsage) {
+  if (safeAccount.codexUsage) {
+    const pending = options.pendingQuotaTimers ?? false;
     safeAccount.codexUsage = {
       ...safeAccount.codexUsage,
-      primaryWindow: safeAccount.codexUsage.primaryWindow
-        ? { ...safeAccount.codexUsage.primaryWindow, resetAfterSeconds: -1 }
-        : undefined,
-      secondaryWindow: safeAccount.codexUsage.secondaryWindow
-        ? { ...safeAccount.codexUsage.secondaryWindow, resetAfterSeconds: -1 }
-        : undefined,
+      primaryWindow: recalcWindow(safeAccount.codexUsage.primaryWindow, pending),
+      secondaryWindow: recalcWindow(safeAccount.codexUsage.secondaryWindow, pending),
     };
   }
   return safeAccount;
