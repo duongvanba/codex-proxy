@@ -7,6 +7,7 @@ const CALLBACK_PORT = 1455;
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/auth/callback`;
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const FRONTEND_LOGIN_URL = process.env.FRONTEND_LOGIN_URL ?? "http://localhost:9000/auth/login";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -313,25 +314,9 @@ export class LoginFlowService {
             return html("Login failed", `<p>${error}</p>`, 400);
           }
 
-          try {
-            const result = await this.exchangeCodeForAccount(code, verifier, onAccount, onError, onEvent);
-            if (result.ok) {
-              return html(
-                "Login successful",
-                `<h2>Login successful</h2><p>Account <strong>${result.email}</strong> has been saved.<br>This tab will close automatically.</p><script>setTimeout(()=>window.close(),2000)</script>`,
-                200
-              );
-            }
-
-            return html("Login failed", `<pre>${result.error ?? "unknown"}</pre>`, 500);
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            this.logger.logEvent("login_exception", msg);
-            onEvent?.({ type: "login_exception", error: msg });
-            onError(msg);
-            this.stopServer();
-            return html("Error", `<pre>${msg}</pre>`, 500);
-          }
+          const redirectUrl = new URL(FRONTEND_LOGIN_URL);
+          redirectUrl.searchParams.set("callback_url", url.toString());
+          return Response.redirect(redirectUrl.toString(), 302);
         },
       });
     } catch (e) {
@@ -352,10 +337,7 @@ export class LoginFlowService {
 
     console.log(`[login] Callback server started on http://localhost:${CALLBACK_PORT}`);
 
-    Bun.$`open ${authorizeUrl}`.catch(() => {
-      console.log(`[login] Could not open browser. URL: ${authorizeUrl}`);
-    });
-
+    // KHÔNG mở trình duyệt từ backend — frontend tự mở authorizeUrl (window.open).
     return { ok: true, authorizeUrl };
   }
 }

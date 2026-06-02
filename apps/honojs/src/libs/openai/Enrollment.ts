@@ -72,6 +72,21 @@ export class EnrollmentService {
 
   private pendingEnrollments = new Map<string, PendingEnrollment>(); // pendingId → state
   private completedEnrollments = new Map<string, EnrollmentEntry>();  // accountId → entry
+
+  // Báo cho composition root mỗi khi trạng thái enroll của 1 account đổi (start/complete/delete)
+  // để re-publish account doc → modal cập nhật enrollStatus realtime.
+  private onChangeCb: ((accountId: string) => void) | null = null;
+  onChange(cb: (accountId: string) => void): void { this.onChangeCb = cb; }
+  private emitChange(accountId: string): void { try { this.onChangeCb?.(accountId); } catch { /* ignore */ } }
+
+  /** Trạng thái enroll cho UI: ready (đã enroll), enrolling (đang chờ hoàn tất OAuth), none. */
+  async getEnrollStatus(accountId: string): Promise<"none" | "enrolling" | "ready"> {
+    await this.loadEnrollments();
+    if (this.completedEnrollments.has(accountId)) return "ready";
+    await this.loadPending();
+    for (const p of this.pendingEnrollments.values()) if (p.accountId === accountId) return "enrolling";
+    return "none";
+  }
   private enrollmentsLoaded = false;
   private pendingLoaded = false;
 
@@ -129,6 +144,15 @@ export class EnrollmentService {
   }
 
   // ─── Local callback server ────────────────────────────────────────────────────
+
+  /** Đóng MỌI callback server enroll đang chạy (giải phóng port 1455/1457). Dùng khi huỷ/xoá
+   *  enroll, hoặc nhường port cho login (login + enroll dùng chung port). */
+  closeCallbackServers(): void {
+    for (const [port, server] of this.activeCallbackServers) {
+      try { server.stop(true); } catch { /* ignore */ }
+      this.activeCallbackServers.delete(port);
+    }
+  }
 
   private startCallbackServer(): { port: number; close: () => void } {
     for (const port of CALLBACK_PORTS) {
@@ -337,6 +361,7 @@ export class EnrollmentService {
     const enrollUrl = `${AUTH_ISSUER}/oauth/authorize?${params}`;
 
     console.log(`[enroll] started for ${account.email}, client_id=${client_id}, pendingId=${pendingId}, callback=port:${port}`);
+    this.emitChange(account.id); // → enrollStatus "enrolling"
     return { enrollUrl, pendingId, clientId: client_id };
   }
 
@@ -468,6 +493,7 @@ export class EnrollmentService {
     await this.savePending();
 
     console.log(`[enroll] completed for accountId=${accountId}, clientId=${entry.clientId}`);
+    this.emitChange(accountId); // → enrollStatus "ready"
     return entry;
   }
 
@@ -475,6 +501,11 @@ export class EnrollmentService {
     await this.loadEnrollments();
     this.completedEnrollments.delete(accountId);
     await this.saveEnrollments();
+    // Xoá cả pending của account (nếu đang enrolling dở) rồi báo đổi → enrollStatus "none".
+    for (const [id, p] of this.pendingEnrollments) if (p.accountId === accountId) this.pendingEnrollments.delete(id);
+    await this.savePending();
+    this.closeCallbackServers(); // tránh rò rỉ callback server giữ port 1455
+    this.emitChange(accountId);
   }
 
   async getPendingEnrollment(pendingId: string): Promise<PendingEnrollment | undefined> {

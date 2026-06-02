@@ -5,65 +5,98 @@ import type { LivequeryDocument } from "@livequery/client";
 import type { ChatDoc } from "@codex/types";
 import { FolderPicker } from "@components/FolderPicker";
 import { useTheme } from "@helpers/use-theme";
+import { useTrigger } from "@helpers/use-trigger";
 
 type ProjectGroup = {
   path: string;
   label: string;
   chats: LivequeryDocument<ChatDoc>[];
+  lastUpdated: number;
 };
+
+function chatUpdatedAt(doc: LivequeryDocument<ChatDoc>): number {
+  const value = doc.getValue();
+  const raw = value.updated_at ?? value.created_at;
+  const parsed = raw ? Date.parse(raw) : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 function groupChatsByProject(chatDocs: LivequeryDocument<ChatDoc>[]): ProjectGroup[] {
   const map = new Map<string, ProjectGroup>();
   for (const doc of chatDocs) {
     const path = (doc.value as Record<string, unknown>).workspace_root as string | undefined ?? "";
     const label = path ? path.replace(/^.*\//, "") || path : "General";
-    if (!map.has(path)) map.set(path, { path, label, chats: [] });
-    map.get(path)!.chats.push(doc);
+    if (!map.has(path)) map.set(path, { path, label, chats: [], lastUpdated: 0 });
+    const group = map.get(path)!;
+    group.chats.push(doc);
+    group.lastUpdated = Math.max(group.lastUpdated, chatUpdatedAt(doc));
   }
   return [...map.values()].sort((a, b) => {
     if (!a.path) return 1;
     if (!b.path) return -1;
-    return a.path.localeCompare(b.path);
+    return (b.lastUpdated - a.lastUpdated) || a.path.localeCompare(b.path);
   });
 }
 
 function ChatItem({
-  doc, selectedChatId, onChatSelect,
+  doc, selectedChatId, onChatSelect, onDeleteChat, onRenameChat,
 }: {
   doc: LivequeryDocument<ChatDoc>;
   selectedChatId: string | null;
   onChatSelect: (chatId: string) => void;
+  onDeleteChat: (chatId: string, title?: string) => void;
+  onRenameChat: (chatId: string, title?: string) => void;
 }) {
   const chat = useObservable(doc);
   const isSelected = chat.id === selectedChatId;
   const processing = chat.status === "in_progress";
+  const remoteStatus = (chat as ChatDoc & { remote_status?: string }).remote_status;
+  const statusLabel = chat.status === "system_error" || remoteStatus === "systemError"
+    ? { className: "error", text: "systemError" }
+    : chat.status === "needs_response"
+      ? { className: "needs-response", text: "Cần xác nhận" }
+      : null;
   return (
-    <div
-      className={`chat-item ${isSelected ? "selected" : ""}`}
-      onClick={() => onChatSelect(chat.id)}
-      title={chat.title ?? chat.id}
-    >
+    <div className={`chat-item ${isSelected ? "selected" : ""}`} title={chat.title ?? chat.id}>
+      <div
+        className="chat-item-main"
+        onClick={() => onChatSelect(chat.id)}
+        onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); onRenameChat(chat.id, chat.title); }}
+      >
       {processing
         ? <span className="chat-spinner" title="Agent đang xử lý" />
         : <span className={`chat-status-dot ${isSelected ? "active" : "done"}`} title={isSelected ? "Đang mở" : "Hoàn tất"} />}
       <span className="chat-title">{chat.title ?? "Untitled"}</span>
+      {statusLabel && <span className={`chat-state-label ${statusLabel.className}`}>{statusLabel.text}</span>}
+      </div>
+      <button
+        className="chat-delete-btn"
+        title="Xoá chat"
+        aria-label="Xoá chat"
+        onClick={(e) => { e.stopPropagation(); onDeleteChat(chat.id, chat.title); }}
+      >
+        <TrashIcon />
+      </button>
     </div>
   );
 }
 
 function ProjectGroupItem({
-  group, selectedChatId, onChatSelect, onNewChat,
+  group, selectedChatId, onChatSelect, onNewChat, onDeleteChat, onRenameChat,
 }: {
   group: ProjectGroup;
   selectedChatId: string | null;
   onChatSelect: (chatId: string) => void;
   onNewChat: (projectPath: string) => void;
+  onDeleteChat: (chatId: string, title?: string) => void;
+  onRenameChat: (chatId: string, title?: string) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   return (
     <div className="project-group">
       <div className="project-header" onClick={() => setExpanded((v) => !v)}>
         <span className="project-chevron">{expanded ? "▾" : "▸"}</span>
+        <FolderIcon />
         <span className="project-label" title={group.path || "General"}>{group.label || "General"}</span>
         <button
           className="btn-icon"
@@ -84,6 +117,8 @@ function ProjectGroupItem({
                 doc={doc}
                 selectedChatId={selectedChatId}
                 onChatSelect={onChatSelect}
+                onDeleteChat={onDeleteChat}
+                onRenameChat={onRenameChat}
               />
             ))
           )}
@@ -109,6 +144,8 @@ export function ProjectSidebar({
 }: ProjectSidebarProps) {
   const navigate = useNavigate();
   const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<{ chatId: string; title: string } | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const { theme, toggle: toggleTheme } = useTheme();
 
   // ─── Kéo đổi rộng sidebar ──────────────────────────────────────────────────
@@ -145,6 +182,34 @@ export function ProjectSidebar({
   const loading = useObservable(chatsCollection.loading, null);
   const error = useObservable(chatsCollection.error, null) as { code?: string; message?: string } | null;
   const groups = groupChatsByProject(chatDocs);
+  const trigger = useTrigger();
+
+  async function deleteChat(chatId: string, title?: string) {
+    if (!confirm(`Xoá chat "${title || chatId}"?`)) return;
+    try {
+      await trigger(`accounts/${accountId}/hosts/${hostId}/chats/${chatId}`, "archive-chat");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function openRenameChat(chatId: string, title?: string) {
+    setRenameTarget({ chatId, title: title || "" });
+    setRenameValue(title || "");
+  }
+
+  async function submitRenameChat() {
+    if (!renameTarget) return;
+    const title = renameValue.trim();
+    if (!title) return;
+    try {
+      await trigger(`accounts/${accountId}/hosts/${hostId}/chats/${renameTarget.chatId}`, "rename-chat", { title });
+      setRenameTarget(null);
+      setRenameValue("");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   return (
     <aside
@@ -153,7 +218,7 @@ export function ProjectSidebar({
     >
       <div className="workspace-sidebar-inner">
       <div className="sidebar-header">
-        <button className="btn-sidebar-back" title="Back to hosts" onClick={() => navigate(`/accounts/${accountId}`)}>←</button>
+        <button className="btn-sidebar-back" title="Về trang chủ" onClick={() => navigate("/")}>←</button>
         <span className="sidebar-title">Projects</span>
         <button className="btn-sidebar-toggle" onClick={toggleTheme} title="Đổi sáng/tối" aria-label="Đổi theme">{theme === "dark" ? "☀" : "☾"}</button>
         <button className="btn-icon" title="Dự án mới" onClick={() => setShowFolderPicker(true)}>+</button>
@@ -180,6 +245,8 @@ export function ProjectSidebar({
             selectedChatId={selectedChatId ?? null}
             onChatSelect={onChatSelect}
             onNewChat={onNewChat}
+            onDeleteChat={deleteChat}
+            onRenameChat={openRenameChat}
           />
         ))}
       </div>
@@ -192,8 +259,42 @@ export function ProjectSidebar({
           onCancel={() => setShowFolderPicker(false)}
         />
       )}
+      {renameTarget && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setRenameTarget(null); }}>
+          <div className="modal rename-chat-modal">
+            <div className="modal-title">Rename chat</div>
+            <input
+              className="modal-input"
+              value={renameValue}
+              autoFocus
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setRenameTarget(null);
+                if (e.key === "Enter") void submitRenameChat();
+              }}
+            />
+            <div className="modal-actions">
+              <button className="secondary-btn" onClick={() => setRenameTarget(null)}>Cancel</button>
+              <button disabled={!renameValue.trim()} onClick={() => void submitRenameChat()}>Rename</button>
+            </div>
+          </div>
+        </div>
+      )}
       {sidebarOpen && <div className="sidebar-resizer" onMouseDown={startResize} title="Kéo để đổi rộng" />}
     </aside>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2.5 4h11" />
+      <path d="M6.5 2.5h3l.5 1.5h-4z" />
+      <path d="M5 6v6.5" />
+      <path d="M8 6v6.5" />
+      <path d="M11 6v6.5" />
+      <path d="M4 4l.5 10h7L12 4" />
+    </svg>
   );
 }
 
@@ -203,6 +304,15 @@ function HamburgerIcon() {
       <line x1="2.5" y1="4.5" x2="13.5" y2="4.5" />
       <line x1="2.5" y1="8" x2="13.5" y2="8" />
       <line x1="2.5" y1="11.5" x2="13.5" y2="11.5" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg className="project-folder-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2.2 4.2h4l1.3 1.6h6.3v6.6a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2V4.2z" />
+      <path d="M2.2 4.2v-.6a1.2 1.2 0 0 1 1.2-1.2h2.8l1.1 1.8" />
     </svg>
   );
 }

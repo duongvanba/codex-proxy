@@ -87,6 +87,13 @@ context/      — hosts-context, workspace-context
 helpers/      — livequery-client, NextRoutingStyle (file-based routing kiểu Next)
 ```
 
+#### ChatPanel — UX
+
+- **Composer tách riêng (`memo`)** — khung nhập giữ state `input` cục bộ, nên gõ phím KHÔNG re-render danh sách turn (tránh lag khi hội thoại dài). Parent truyền `onSend/onCancel/onToggleTerminal` qua `useCallback` (stable) để `memo` có hiệu lực.
+- **Sticky auto-scroll** — `useStickyScroll` (MutationObserver bắt cả turn mới lẫn token streaming) chỉ tự cuộn khi đang ở đáy. **Lăn chuột lên là dừng auto-scroll ngay** (listener `wheel`, `deltaY < 0`); cuộn lại tới đáy thì bật lại.
+- **Optimistic không nhấp đúp** — tin vừa gửi hiện bubble tạm; khi turn user thật về (so id mới + nội dung) bubble tạm ẩn ngay trong cùng render (không chờ effect) nên không bị "hiện 2 lần".
+- **Gửi tin** — không hiện chữ "Đang gửi"; nút send chuyển spinner + textbox bị disable. Khi agent chạy, status row "Đang xử lý…" (icon động) hiện ở cuối turn cuối.
+
 ## Cài đặt & Chạy
 
 ```bash
@@ -208,7 +215,9 @@ Luồng kết nối tới Codex trên máy khác:
 4. Backend kết nối qua WebSocket relay `wss://chatgpt.com/backend-api/codex/remote/control/client`
 5. Giao tiếp theo protocol: `device_key_challenge` → `device_key_proof` → `initialize` → `ready`
 
-Token remote control hết hạn mỗi ~10 phút và được auto-refresh khi gần hết hạn.
+Token remote control hết hạn mỗi ~10 phút và được **auto-refresh ở MỖI lần (re)connect**: `WebsocketRelay` nhận một **token provider** (`getToken: () => Promise<string>`) qua constructor thay vì token tĩnh; pipeline `connect()` (rxjs `defer`) gọi lại provider mỗi lần subscribe, nên khi relay rớt và `retry` reconnect, nó luôn lấy token tươi (`RemoteControlRegistry.freshToken` → `EnrollmentService.refreshEnrollment` nếu token sắp/đã hết hạn). Trước đây token bị "nướng cứng" lúc tạo relay, khiến connection pooled không refresh được sau khi hết hạn → host-chats trả rỗng âm thầm.
+
+> Lỗi fetch host-chats (relay rớt / token hỏng) **không còn bị nuốt**: `LivequeryStore.streamChats` để lỗi nổi lên controller → trả `502 UPSTREAM_ERROR` cho UI thấy, thay vì "0 chat im lặng".
 
 Đặc tả giao thức đầy đủ: [`RELAY_WS_PROTOCOL.md`](RELAY_WS_PROTOCOL.md).
 

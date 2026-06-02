@@ -292,6 +292,28 @@ export class AccountsService {
     return result;
   }
 
+  /**
+   * Tự refresh access token cho MỌI account sắp hết hạn & có refresh token.
+   * `refreshAccountAccessToken` đã tự bỏ qua account chưa sắp hết hạn (trả refreshed:false)
+   * và dedup request đang bay, nên gọi lặp lại an toàn. Trả về số account thực sự refresh được
+   * để caller quyết định có cần đẩy realtime hay không.
+   */
+  async autoRefreshExpiringTokens(minTtlMs = TOKEN_REFRESH_MIN_TTL_MS): Promise<number> {
+    const accounts = this.loadAccounts();
+    let refreshed = 0;
+    for (const account of accounts) {
+      if (!account.refreshToken) continue;
+      if (!this.tokenExpiresWithin(account.accessToken, minTtlMs)) continue;
+      try {
+        const result = await this.refreshAccountAccessToken(account, { minTtlMs });
+        if (result.ok && result.refreshed) refreshed++;
+      } catch {
+        // Lỗi 1 account không được chặn các account còn lại.
+      }
+    }
+    return refreshed;
+  }
+
   async refreshCodexUsageForAccounts(force = false): Promise<void> {
     const accounts = this.loadAccounts();
     const now = Date.now();
@@ -487,6 +509,21 @@ export class AccountsService {
     this.saveAccounts(accounts);
     console.log(`[accounts] Selected account: ${target.email}`);
     return { ok: true };
+  }
+
+  /** Gỡ mọi cờ chặn của 1 account (expired / rate_limit / codexUsage.limitReached) → trở lại usable.
+   *  Dùng cho switch thủ công: tin tưởng lựa chọn của user, để upstream tự quyết 401/429. */
+  clearBlockedState(accountId: string) {
+    const accounts = this.loadAccounts();
+    const account = accounts.find((a) => a.id === accountId);
+    if (!account) return;
+    account.status = "active";
+    account.rateLimitUntil = undefined;
+    if (account.codexUsage?.limitReached) {
+      account.codexUsage = { ...account.codexUsage, limitReached: false };
+    }
+    this.saveAccounts(accounts);
+    console.log(`[accounts] Cleared blocked state for ${account.email} (manual switch)`);
   }
 
   markRateLimited(accountId: string, retryAfterMs: number = 60_000) {

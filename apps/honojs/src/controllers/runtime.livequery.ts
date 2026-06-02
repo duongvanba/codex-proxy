@@ -24,10 +24,9 @@ export class RuntimeController extends Hono {
 
     lq.get("/livequery/runtime", (c) => {
       const origin = new URL(c.req.url).origin;
-      const wsPort = parseInt(process.env.LIVEQUERY_WS_PORT ?? "9879");
       const wsProto = origin.startsWith("https") ? "wss" : "ws";
-      const wsHost = new URL(origin).hostname;
-      return livequeryJson(c, { data: { item: { id: "runtime", realtime_url: `${wsProto}://${wsHost}:${wsPort}/livequery/realtime-updates` } } } as any);
+      const wsOrigin = origin.replace(/^https?/, wsProto);
+      return livequeryJson(c, { data: { item: { id: "runtime", realtime_url: `${wsOrigin}/livequery/realtime-updates` } } } as any);
     });
 
     this.get("/health", (c) => c.json(this.store.getHealth(deps.openaiBaseUrl)));

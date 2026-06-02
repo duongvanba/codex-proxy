@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import type { AccountsService } from "./accounts";
+import type { AccountService } from "./account-service";
 import type { UpstreamProxy } from "../libs/upstream";
 
 const PROXY_HOME = join(homedir(), ".codex-proxy");
@@ -32,7 +32,7 @@ interface UnsupportedRouteLogEntry {
 
 export class UnsupportedRoutesService {
   constructor(
-    private readonly accounts: AccountsService,
+    private readonly accountService: AccountService,
     private readonly upstream: UpstreamProxy
   ) {}
 
@@ -79,7 +79,7 @@ export class UnsupportedRoutesService {
     logEntry: UnsupportedRouteLogEntry;
   }> {
     const url = new URL(req.url);
-    const account = this.accounts.getActiveAccount();
+    const account = this.accountService.pickForProxy();
     const body = await this.readRequestBody(req);
     const attempts: UpstreamAttempt[] = [];
     const targets = this.inferTargets(url.pathname);

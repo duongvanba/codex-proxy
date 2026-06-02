@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RcHost, RcStatus } from "@codex/types";
+import { WORKER_SERVICES, useService } from "@/hooks/useWorkerService";
+
+async function authHeaders(getAccessToken: () => Promise<string | null>, headers: Record<string, string> = {}) {
+  const token = await getAccessToken();
+  return token ? { ...headers, Authorization: `Bearer ${token}` } : headers;
+}
 
 async function runShellStream(
   accountId: string,
   envId: string,
   command: string,
+  getAccessToken: () => Promise<string | null>,
   onDelta: (delta: string) => void
 ): Promise<{ exitCode: number; threadId?: string }> {
   const res = await fetch(`/livequery/accounts/${accountId}/~rc-shell`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(getAccessToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({ env_id: envId, command }),
   });
   if (!res.ok || !res.body) {
@@ -44,6 +51,7 @@ async function runShellStream(
 }
 
 export function RemoteEnrollPanel({ accountId }: { accountId: string }) {
+  const auth = useService(WORKER_SERVICES.auth);
   const [status, setStatus] = useState<RcStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +67,7 @@ export function RemoteEnrollPanel({ accountId }: { accountId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/livequery/accounts/${accountId}/rc-hosts`);
+      const res = await fetch(`/livequery/accounts/${accountId}/rc-hosts`, { headers: await authHeaders(auth.getAccessToken) });
       const data = await res.json() as { data?: { item?: RcStatus }; error?: { message?: string } };
       if (!res.ok) throw new Error(data.error?.message ?? `HTTP ${res.status}`);
       const item = data.data?.item ?? { enrolled: false, hosts: [] };
@@ -70,7 +78,7 @@ export function RemoteEnrollPanel({ accountId }: { accountId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [accountId, selectedEnvId]);
+  }, [accountId, auth, selectedEnvId]);
 
   useEffect(() => { loadStatus(); }, [accountId]);
   useEffect(() => {
@@ -81,7 +89,7 @@ export function RemoteEnrollPanel({ accountId }: { accountId: string }) {
     setLoading(true); setError(null);
     try {
       const res = await fetch(`/livequery/accounts/${accountId}/~rc-enroll-start`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await authHeaders(auth.getAccessToken, { "Content-Type": "application/json" }),
         body: JSON.stringify({ account_id: accountId }),
       });
       const data = await res.json() as { data?: { authorize_url?: string }; error?: { message?: string } };
@@ -97,7 +105,7 @@ export function RemoteEnrollPanel({ accountId }: { accountId: string }) {
     setLoading(true); setError(null);
     try {
       const res = await fetch(`/livequery/accounts/${accountId}/~rc-enroll-delete`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await authHeaders(auth.getAccessToken, { "Content-Type": "application/json" }),
         body: JSON.stringify({ account_id: accountId }),
       });
       if (!res.ok) { const d = await res.json().catch(() => ({})) as any; throw new Error(d.error?.message ?? `HTTP ${res.status}`); }
@@ -110,7 +118,7 @@ export function RemoteEnrollPanel({ accountId }: { accountId: string }) {
     if (!shellCmd.trim() || !selectedEnvId || shellRunning) return;
     setShellRunning(true); setShellError(null); setLastExitCode(null); setShellOutput("");
     try {
-      const result = await runShellStream(accountId, selectedEnvId, shellCmd.trim(), (d) => setShellOutput((o) => o + d));
+      const result = await runShellStream(accountId, selectedEnvId, shellCmd.trim(), auth.getAccessToken, (d) => setShellOutput((o) => o + d));
       setLastExitCode(result.exitCode);
     } catch (e) { setShellError(e instanceof Error ? e.message : "Shell command failed");
     } finally { setShellRunning(false); }

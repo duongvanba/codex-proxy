@@ -30,7 +30,7 @@ wss://chatgpt.com/backend-api/codex/remote/control/client
 |---|---|---|
 | `Authorization` | `Bearer <account.accessToken>` | OAuth access token của account |
 | `ChatGPT-Account-Id` / `chatgpt-account-id` | `<account.accountId>` | |
-| `x-codex-client-session-token` | `Bearer <enrollment.token>` | remote-control token (TTL ~10 phút) |
+| `x-codex-client-session-token` | `Bearer <token tươi>` | remote-control token (TTL ~10 phút), lấy từ token provider mỗi lần connect |
 | `x-codex-client-id` | `<enrollment.clientId>` | id của client đã enroll |
 | `x-codex-protocol-version` | `3` | hằng `PROTOCOL_VERSION` |
 | `OpenAI-Beta` | `responses=experimental` | |
@@ -38,7 +38,7 @@ wss://chatgpt.com/backend-api/codex/remote/control/client
 | `Originator` | `codex_cli_rs` | giả lập Codex CLI |
 | `User-Agent`, `Version` | theo client Codex | |
 
-`enrollment.token` được làm tươi (refresh) trước khi connect nếu sắp hết hạn — xem `RemoteControlRegistry.loadEnrollment`.
+Token được làm tươi ở **mỗi lần (re)connect**, không chỉ lần đầu: `WebsocketRelay` nhận `getToken: () => Promise<string>` (constructor) và pipeline `connect()` (rxjs `defer`) gọi lại nó mỗi lần subscribe. Registry truyền `() => freshToken(account)` → `EnrollmentService.refreshEnrollment` nếu `tokenExpiresAt` sắp/đã hết hạn. Nhờ đó connection pooled tự reconnect bằng token mới sau khi token cũ hết hạn (không còn dùng token "nướng cứng" lúc tạo relay).
 
 ---
 

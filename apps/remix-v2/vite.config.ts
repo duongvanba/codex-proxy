@@ -7,20 +7,30 @@ export default defineConfig({
   envPrefix: "PUBLIC_",
   server: {
     host: "0.0.0.0",
-    port: 3000,
+    port: 9000,
+    hmr: false,
+    allowedHosts: ["opaip.amazingproxy.xyz", "codex", "codex.duyenruby.com"],
     proxy: {
-      // Forward API calls to Bun backend in dev. Realtime WS (9879) KHÔNG đi proxy —
-      // browser kết nối thẳng tới gateway (xem helpers/livequery-client.ts).
+      "/livequery/realtime-updates": {
+        target: "http://127.0.0.1:9876",
+        ws: true,
+        changeOrigin: true,
+      },
+      // Forward API calls to Bun backend in dev.
       "/livequery": {
-        target: "http://localhost:9878",
+        target: "http://127.0.0.1:9876",
+        changeOrigin: true,
+      },
+      "/auth-api": {
+        target: "http://127.0.0.1:9876",
         changeOrigin: true,
       },
       "/v1": {
-        target: "http://localhost:9878",
+        target: "http://127.0.0.1:9876",
         changeOrigin: true,
       },
       "/backend-api": {
-        target: "http://localhost:9878",
+        target: "http://127.0.0.1:9876",
         changeOrigin: true,
       },
     },

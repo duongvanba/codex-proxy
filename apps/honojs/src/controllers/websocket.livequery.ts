@@ -8,7 +8,7 @@ import { join } from "path";
 
 // ─── WsData ───────────────────────────────────────────────────────────────────
 export interface WsData {
-  kind?: "codex" | "livequery";
+  kind?: "codex" | "livequery" | "frontend";
   upstreamUrl?: string;
   headers?: Record<string, string>;
   email?: string;
@@ -22,6 +22,8 @@ export interface WsData {
   switchAttemptedAccountIds?: Set<string>;
   livequeryClientId?: string;
   livequeryRefs?: Set<string>;
+  livequeryQueue?: Array<string | Buffer | ArrayBuffer>;
+  frontendQueue?: Array<string | Buffer | ArrayBuffer>;
 }
 
 const WS_RESPONSE_LOG_FILE = join(import.meta.dir, "../../../logs", "websocket-responses.ndjson");
@@ -219,14 +221,81 @@ export class WebsocketController {
 
   // ── Public WebSocket handlers ──────────────────────────────────────────────
 
-  handleWsOpen(_ws: { data: WsData }): void {
-    console.log(`[ws] client connected [${_ws.data.email}]`);
+  private openLivequeryUpstream(ws: { send(data: string | ArrayBuffer | Buffer): void; close(code?: number, reason?: string): void; data: WsData }): void {
+    const upstream = new WebSocket(`ws://127.0.0.1:${process.env.LIVEQUERY_WS_PORT ?? "9879"}/livequery/realtime-updates`);
+    ws.data.upstream = upstream;
+    ws.data.livequeryQueue = [];
+
+    upstream.onopen = () => {
+      const queue = ws.data.livequeryQueue ?? [];
+      ws.data.livequeryQueue = [];
+      for (const item of queue) upstream.send(item as any);
+    };
+    upstream.onmessage = (event) => {
+      try { ws.send(event.data as any); } catch {}
+    };
+    upstream.onerror = () => {
+      try { ws.close(1011, "LiveQuery upstream error"); } catch {}
+    };
+    upstream.onclose = (event) => {
+      try { ws.close(event.code || 1000, event.reason || ""); } catch {}
+    };
+  }
+
+  private openFrontendUpstream(ws: { send(data: string | ArrayBuffer | Buffer): void; close(code?: number, reason?: string): void; data: WsData }): void {
+    const upstream = new WebSocket(ws.data.upstreamUrl!);
+    ws.data.upstream = upstream;
+    ws.data.frontendQueue = [];
+
+    upstream.onopen = () => {
+      const queue = ws.data.frontendQueue ?? [];
+      ws.data.frontendQueue = [];
+      for (const item of queue) upstream.send(item as any);
+    };
+    upstream.onmessage = (event) => {
+      try { ws.send(event.data as any); } catch {}
+    };
+    upstream.onerror = () => {
+      try { ws.close(1011, "Frontend upstream error"); } catch {}
+    };
+    upstream.onclose = (event) => {
+      try { ws.close(event.code || 1000, event.reason || ""); } catch {}
+    };
+  }
+
+  handleWsOpen(ws: { send(data: string | ArrayBuffer | Buffer): void; close(code?: number, reason?: string): void; data: WsData }): void {
+    if (ws.data.kind === "livequery") {
+      this.openLivequeryUpstream(ws);
+      return;
+    }
+    if (ws.data.kind === "frontend") {
+      this.openFrontendUpstream(ws);
+      return;
+    }
+    console.log(`[ws] client connected [${ws.data.email}]`);
   }
 
   handleWsMessage(
     ws: { send(data: string | ArrayBuffer): void; close(code?: number, reason?: string): void; data: WsData },
     message: string | Buffer | ArrayBuffer
   ): void {
+    if (ws.data.kind === "livequery") {
+      if (ws.data.upstream?.readyState === WebSocket.OPEN) {
+        ws.data.upstream.send(message as any);
+      } else {
+        (ws.data.livequeryQueue ??= []).push(message as any);
+      }
+      return;
+    }
+    if (ws.data.kind === "frontend") {
+      if (ws.data.upstream?.readyState === WebSocket.OPEN) {
+        ws.data.upstream.send(message as any);
+      } else {
+        (ws.data.frontendQueue ??= []).push(message as any);
+      }
+      return;
+    }
+
     const snippet = typeof message === "string" ? message.slice(0, 200) : `[binary ${(message as ArrayBuffer).byteLength ?? 0}b]`;
     console.log(`[ws→up] [${ws.data.email}] ${snippet}`);
 
@@ -260,6 +329,14 @@ export class WebsocketController {
     code: number,
     reason: string
   ): void {
+    if (ws.data.kind === "livequery") {
+      try { ws.data.upstream?.close(); } catch {}
+      return;
+    }
+    if (ws.data.kind === "frontend") {
+      try { ws.data.upstream?.close(); } catch {}
+      return;
+    }
     console.log(`[ws] client disconnected: ${code} ${reason ?? ""} [${ws.data.email}]`);
     try { ws.data.upstream?.close(); } catch {}
   }
@@ -279,4 +356,3 @@ export class WebsocketController {
     return { payloadType: "text", payload, byteLength: new TextEncoder().encode(payload).byteLength };
   }
 }
-

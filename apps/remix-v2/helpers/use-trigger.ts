@@ -1,6 +1,6 @@
 import { useAction } from "@livequery/react";
 import { lastValueFrom } from "rxjs";
-import { livequeryClient } from "./livequery-client";
+import { useLivequeryClient } from "@/hooks/useWorkerService";
 
 /**
  * Hook chuẩn để gọi MỌI action của LiveQuery.
@@ -20,6 +20,8 @@ import { livequeryClient } from "./livequery-client";
  *   - `accounts/:id/chats/:chatId`            → action cấp chat (send-message, cancel-chat…)
  */
 export function useTrigger() {
+  const livequeryClient = useLivequeryClient();
+
   return useAction(
     <T = unknown>(ref: string, action: string, payload?: Record<string, unknown>): Promise<T> =>
       lastValueFrom(livequeryClient.trigger<T>({ ref, action, payload }))

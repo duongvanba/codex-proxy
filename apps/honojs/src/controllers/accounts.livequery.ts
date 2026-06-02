@@ -7,7 +7,8 @@ import type { LoggerService } from "../services/logger";
 import type { CodexApiService } from "../libs/chatgpt";
 import type { EnrollmentService, LoginFlowService } from "../libs/openai";
 import type { RemoteControlRegistry } from "../libs/codex-remote-control";
-import { LivequeryStore, json, error, parseEnvId, resolveOpenaiBaseUrl, serializeAccount, collectionResponse } from "../services/livequery";
+import type { AccountService } from "../services/account-service";
+import { LivequeryStore, json, error, parseEnvId, resolveOpenaiBaseUrl, collectionResponse } from "../services/livequery";
 import { buildCtx, type LivequeryDeps } from "./_livequery";
 
 /** Collection `accounts` + doc `rc-hosts` + actions cấp account/collection (login, config, enroll, refresh, cloud create-chat, rc-shell). */
@@ -15,6 +16,7 @@ export class AccountsController extends Hono {
   constructor(
     private readonly store: LivequeryStore,
     private readonly accounts: AccountsService,
+    private readonly accountService: AccountService,
     private readonly enrollment: EnrollmentService,
     private readonly loginFlow: LoginFlowService,
     private readonly logger: LoggerService,
@@ -59,6 +61,7 @@ export class AccountsController extends Hono {
   private runAction(action: string, ctx: LivequeryContext, origin: string): Promise<Response> | Response {
     switch (action) {
       case "refresh-usage": return this.refreshUsage();
+      case "fetch-quota": return this.refreshUsage();
       case "select-account": return this.selectAccount(ctx);
       case "remove-account": return this.removeAccount(ctx);
       case "login-status": return json({ data: { in_progress: this.loginFlow.isLoginInProgress() } });
@@ -87,19 +90,16 @@ export class AccountsController extends Hono {
 
   private async handleAccounts(ctx: LivequeryContext): Promise<Response> {
     if (ctx.request.method !== "GET") return error("METHOD_NOT_ALLOWED", "Accounts collection only supports GET", 405);
-    const docs = await Promise.all(this.accounts.getAccounts().map(async (account) => ({
-      ...serializeAccount(account, { pendingQuotaTimers: true }),
-      enrolled: !!(await this.enrollment.getEnrollment(account.id)),
-    })));
-    this.store.refreshAccountsUsageInBackground();
+    const docs = await this.accountService.list({ pendingQuotaTimers: true });
     return json({ data: collectionResponse(docs, { collection: "accounts" }) });
   }
 
   // ─── Account actions ───────────────────────────────────────────────────────────
 
+  /** Action `refresh-usage` / `fetch-quota`: check quota TẤT CẢ account (force), đợi xong toàn bộ
+   *  rồi emit realtime (notifyAccountsChanged) và trả kết quả. KHÔNG còn auto-refresh khi load list. */
   private async refreshUsage(): Promise<Response> {
-    await this.accounts.refreshCodexUsageForAccounts(true);
-    this.store.notifyAccountsChanged();
+    await this.accountService.fetchQuota();
     return json({ data: { ok: true } });
   }
 
@@ -107,12 +107,11 @@ export class AccountsController extends Hono {
     const payload = (ctx.request.body ?? {}) as Record<string, unknown>;
     const id = String(ctx.livequery?.keys?.account_id ?? payload.id ?? "");
     if (!id) return error("BAD_REQUEST", "Missing account id");
-    const result = this.accounts.setSelectedAccount(id);
+    const result = this.accountService.switch(id);
     if (!result.ok) return error("BAD_REQUEST", result.error ?? "Could not select account");
     const email = this.accounts.getAccounts().find((a) => a.id === id)?.email ?? id;
     this.logger.logEvent("account_selected", email);
     this.store.addReport({ type: "account_selected", email, timestamp: Date.now() });
-    this.store.notifyAccountsChanged();
     return json({ data: { ok: true } });
   }
 
@@ -130,6 +129,8 @@ export class AccountsController extends Hono {
   }
 
   private startLogin(): Response {
+    // Login + enroll dùng chung port 1455 → đóng mọi callback server enroll còn sót để login bind được.
+    this.enrollment.closeCallbackServers();
     const sendLoginEvent = (entry: object) => {
       this.store.addReport({ ...(entry as Record<string, unknown>), timestamp: Date.now(), type: String((entry as Record<string, unknown>).type ?? "login_event") });
     };

@@ -39,8 +39,14 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Sensitive data (OAuth tokens, certificates, dmg)
 accounts.json
 account-state.json
+internal-auth.json
 certs/
 *.dmg
 
 # Claude Code local config
 .claude/
+.agents/
+skills-lock.json
+
+# Local preview captures
+tmp-light-*.png

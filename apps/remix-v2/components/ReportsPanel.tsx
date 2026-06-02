@@ -1,14 +1,16 @@
 import { type LivequeryDocument, type LivequeryLoadingState } from "@livequery/client";
 import { BehaviorSubject } from "rxjs";
 import { useObservable } from "@livequery/react";
+import { Box, Flex, Heading, HStack, Spinner, Text } from "@chakra-ui/react";
 import type { ReportDoc } from "@codex/types";
 
-function reportClass(report: ReportDoc) {
-  if (report.type === "account_switched") return "report accent";
-  if (report.type?.startsWith("login_")) return report.error ? "report danger" : "report accent";
-  if (report.status === 429) return "report warn";
-  if ((report.status ?? 0) >= 400) return "report danger";
-  return "report";
+/** Màu nhấn của một dòng report theo loại/trạng thái. */
+function reportColor(report: ReportDoc): string {
+  if (report.type === "account_switched") return "blue.fg";
+  if (report.type?.startsWith("login_")) return report.error ? "red.fg" : "blue.fg";
+  if (report.status === 429) return "yellow.fg";
+  if ((report.status ?? 0) >= 400) return "red.fg";
+  return "fg";
 }
 
 function ReportRow({ reportDoc }: { reportDoc: LivequeryDocument<ReportDoc> }) {
@@ -23,13 +25,13 @@ function ReportRow({ reportDoc }: { reportDoc: LivequeryDocument<ReportDoc> }) {
       ? `${report.from} -> ${report.to} [${report.reason}]`
       : report.email || report.error || report.errorSnippet || "";
   return (
-    <div className={reportClass(report)}>
-      <span className="report-time">{time}</span>
-      <span className="report-title">{title}</span>
-      {report.status && <span className="report-status">{report.status}</span>}
-      {report.latencyMs && <span className="report-dim">{report.latencyMs}ms</span>}
-      {detail && <span className="report-dim">{detail}</span>}
-    </div>
+    <HStack gap="2" fontFamily="mono" fontSize="xs" py="1" align="baseline" whiteSpace="nowrap">
+      <Text color="fg.subtle" flexShrink={0}>{time}</Text>
+      <Text color={reportColor(report)} fontWeight="medium">{title}</Text>
+      {report.status != null && <Text color="fg.muted">{report.status}</Text>}
+      {report.latencyMs != null && <Text color="fg.subtle">{report.latencyMs}ms</Text>}
+      {detail && <Text color="fg.subtle" textOverflow="ellipsis" overflow="hidden">{detail}</Text>}
+    </HStack>
   );
 }
 
@@ -42,30 +44,41 @@ export function ReportsPanel({
 }) {
   const loading = Boolean(useObservable(reportsLoading$));
   return (
-    <section>
-      <h2>
-        Reports{" "}
-        {loading && (
-          <span className="section-loading">
-            <span className="inline-spinner" /> loading
-          </span>
-        )}
-      </h2>
-      <div className="reports">
+    <Box as="section" mt="6">
+      <Heading
+        size="xs"
+        color="fg.muted"
+        textTransform="uppercase"
+        letterSpacing="wider"
+        mb="2.5"
+        display="flex"
+        alignItems="center"
+        gap="2"
+      >
+        Reports
+        {loading && <Spinner size="xs" />}
+      </Heading>
+      <Box
+        bg="bg.panel"
+        borderWidth="1px"
+        borderColor="border"
+        rounded="lg"
+        p="3"
+        maxH="420px"
+        overflow="auto"
+      >
         {reports.length === 0 && loading ? (
-          <div className="empty">
-            <span className="inline-spinner" /> Loading reports...
-          </div>
+          <Flex align="center" gap="2" color="fg.muted" fontSize="sm" py="2">
+            <Spinner size="xs" /> Loading reports...
+          </Flex>
         ) : reports.length === 0 ? (
-          <div className="empty">No reports yet.</div>
+          <Text color="fg.muted" fontSize="sm" py="2">No reports yet.</Text>
         ) : (
-          reports
-            .slice(0, 200)
-            .map((reportDoc) => (
-              <ReportRow key={reportDoc.getValue().id} reportDoc={reportDoc} />
-            ))
+          reports.slice(0, 200).map((reportDoc) => (
+            <ReportRow key={reportDoc.getValue().id} reportDoc={reportDoc} />
+          ))
         )}
-      </div>
-    </section>
+      </Box>
+    </Box>
   );
 }

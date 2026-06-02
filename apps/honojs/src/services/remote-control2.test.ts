@@ -405,6 +405,43 @@ describe("WebsocketRelay — request()", () => {
     rc.close();
   });
 
+  test("deduplicates only delta notifications, not approval/status notifications", async () => {
+    const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
+    const ws = await connectWithChallenge(rc);
+    const events: unknown[] = [];
+    const sub = rc.event$.subscribe((event) => events.push(event));
+
+    ws.message({
+      type: "server_message",
+      stream_id: "stream-a",
+      env_id: TEST_ENV_ID,
+      message: { method: "item/agentMessage/delta", params: { threadId: "thread_1", turnId: "turn_1", delta: "a" } },
+    });
+    ws.message({
+      type: "server_message",
+      stream_id: "stream-b",
+      env_id: TEST_ENV_ID,
+      message: { method: "item/agentMessage/delta", params: { threadId: "thread_1", turnId: "turn_1", delta: "b" } },
+    });
+    ws.message({
+      type: "server_message",
+      stream_id: "stream-b",
+      env_id: TEST_ENV_ID,
+      message: {
+        method: "thread/status/changed",
+        params: { threadId: "thread_1", turnId: "turn_1", status: { type: "awaitingApproval" } },
+      },
+    });
+    await Bun.sleep(0);
+
+    expect(events).toHaveLength(2);
+    expect((events[0] as any).method).toBe("item/agentMessage/delta");
+    expect((events[1] as any).method).toBe("thread/status/changed");
+
+    sub.unsubscribe();
+    rc.close();
+  });
+
   test("disconnect() rejects all pending requests immediately", async () => {
     const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
     const ws = await connectWithChallenge(rc);
@@ -503,7 +540,24 @@ describe("WebsocketRelay — auto-initialize during connect()", () => {
 
 describe("WebsocketRelay — sendMessage()", () => {
 
-  test("uses thread/start when no threadId provided", async () => {
+  // Helper: thread MỚI gửi 3 RPC — thread/start (tạo) → thread/resume (load) → turn/start (submit). Trả lời cả ba.
+  async function respondNewThread(
+    ws: MockWebSocket, sentBefore: number,
+    threadResult: unknown = { thread: { id: "t_new" } },
+    turnResult: unknown = { turn: { id: "turn_1" } },
+  ) {
+    const startMsg = JSON.parse(ws.sent[sentBefore]);
+    ws.message({ type: "server_message", message: { id: startMsg.message.id, result: threadResult } });
+    await Bun.sleep(0);
+    const resumeMsg = JSON.parse(ws.sent[sentBefore + 1]);
+    ws.message({ type: "server_message", message: { id: resumeMsg.message.id, result: {} } });
+    await Bun.sleep(0);
+    const turnMsg = JSON.parse(ws.sent[sentBefore + 2]);
+    ws.message({ type: "server_message", message: { id: turnMsg.message.id, result: turnResult } });
+    return { startMsg, resumeMsg, turnMsg };
+  }
+
+  test("thread mới: thread/start (tạo) → thread/resume (load) → turn/start (submit)", async () => {
     const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
     const ws = await connectWithChallenge(rc);
     const sentBefore = ws.sent.length;
@@ -511,11 +565,16 @@ describe("WebsocketRelay — sendMessage()", () => {
     const sendP = rc.sendMessage("hello");
     await Bun.sleep(0);
 
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    expect(msg.message.method).toBe("thread/start");
-    expect(msg.message.params.threadId).toBeNull();
+    const startMsg = JSON.parse(ws.sent[sentBefore]);
+    expect(startMsg.message.method).toBe("thread/start");
+    expect(startMsg.message.params.threadId).toBeNull();
+    expect(startMsg.message.params.input).toEqual([]); // thread/start KHÔNG submit input
 
-    ws.message({ type: "server_message", message: { id: msg.message.id, result: { thread: { id: "t_new" } } } });
+    await respondNewThread(ws, sentBefore);
+    expect(JSON.parse(ws.sent[sentBefore + 1]).message.method).toBe("thread/resume"); // load trước
+    const turnMsg = JSON.parse(ws.sent[sentBefore + 2]);
+    expect(turnMsg.message.method).toBe("turn/start"); // turn/start mới thực sự submit
+    expect(turnMsg.message.params.threadId).toBe("t_new");
     await sendP;
   });
 
@@ -541,19 +600,17 @@ describe("WebsocketRelay — sendMessage()", () => {
     await sendP;
   });
 
-  test("passes text as input array", async () => {
+  test("passes text as input array (trên turn/start)", async () => {
     const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
     const ws = await connectWithChallenge(rc);
     const sentBefore = ws.sent.length;
 
     const sendP = rc.sendMessage("test message");
     await Bun.sleep(0);
+    await respondNewThread(ws, sentBefore);
 
-    const params = JSON.parse(ws.sent[sentBefore]).message.params;
-    expect(params.input).toEqual([{ type: "text", text: "test message", text_elements: [] }]);
-
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    ws.message({ type: "server_message", message: { id: msg.message.id, result: {} } });
+    const turnParams = JSON.parse(ws.sent[sentBefore + 2]).message.params;
+    expect(turnParams.input).toEqual([{ type: "text", text: "test message", text_elements: [] }]);
     await sendP;
   });
 
@@ -568,8 +625,7 @@ describe("WebsocketRelay — sendMessage()", () => {
     const params = JSON.parse(ws.sent[sentBefore]).message.params;
     expect(params.approvalPolicy).toBe("on-request");
 
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    ws.message({ type: "server_message", message: { id: msg.message.id, result: {} } });
+    await respondNewThread(ws, sentBefore);
     await sendP;
   });
 
@@ -590,68 +646,46 @@ describe("WebsocketRelay — sendMessage()", () => {
     expect(params.model).toBe("gpt-4o");
     expect(params.approvalPolicy).toBe("never");
 
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    ws.message({ type: "server_message", message: { id: msg.message.id, result: {} } });
+    await respondNewThread(ws, sentBefore);
     await sendP;
   });
 
-  test("extracts threadId from result.thread.id", async () => {
+  test("extracts threadId from thread/start result.thread.id", async () => {
     const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
     const ws = await connectWithChallenge(rc);
     const sentBefore = ws.sent.length;
 
     const sendP = rc.sendMessage("hi");
     await Bun.sleep(0);
-
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    ws.message({
-      type: "server_message",
-      message: {
-        id: msg.message.id,
-        result: { thread: { id: "019e7013-abc", sessionId: "x" }, model: "gpt-5.5" },
-      },
-    });
+    await respondNewThread(ws, sentBefore, { thread: { id: "019e7013-abc", sessionId: "x" } }, { turn: { id: "turn_x" } });
 
     const { threadId, turnId } = await sendP;
     expect(threadId).toBe("019e7013-abc");
-    expect(turnId).toBe(""); // thread/start response has no turn field
+    expect(turnId).toBe("turn_x");
   });
 
-  test("extracts threadId from result.threadId as fallback", async () => {
+  test("extracts threadId from thread/start result.threadId as fallback", async () => {
     const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
     const ws = await connectWithChallenge(rc);
     const sentBefore = ws.sent.length;
 
     const sendP = rc.sendMessage("hi");
     await Bun.sleep(0);
-
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    ws.message({
-      type: "server_message",
-      message: { id: msg.message.id, result: { threadId: "t_flat", turnId: "turn_1" } },
-    });
+    await respondNewThread(ws, sentBefore, { threadId: "t_flat" }, { turnId: "turn_1" });
 
     const { threadId, turnId } = await sendP;
     expect(threadId).toBe("t_flat");
     expect(turnId).toBe("turn_1");
   });
 
-  test("extracts turnId from result.turn.id when present", async () => {
+  test("extracts turnId from turn/start result.turn.id", async () => {
     const rc = new WebsocketRelay(mockAccount, testEnrollment, TEST_ENV_ID);
     const ws = await connectWithChallenge(rc);
     const sentBefore = ws.sent.length;
 
     const sendP = rc.sendMessage("hi");
     await Bun.sleep(0);
-
-    const msg = JSON.parse(ws.sent[sentBefore]);
-    ws.message({
-      type: "server_message",
-      message: {
-        id: msg.message.id,
-        result: { thread: { id: "t_1" }, turn: { id: "turn_abc" } },
-      },
-    });
+    await respondNewThread(ws, sentBefore, { thread: { id: "t_1" } }, { turn: { id: "turn_abc" } });
 
     const { threadId, turnId } = await sendP;
     expect(threadId).toBe("t_1");
@@ -675,4 +709,3 @@ describe("WebsocketRelay — sendMessage()", () => {
     await expect(sendP).rejects.toThrow("quota exceeded");
   });
 });
-

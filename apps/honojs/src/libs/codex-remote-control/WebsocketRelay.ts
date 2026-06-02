@@ -15,7 +15,7 @@
  *       (action chờ "ready" trước khi gửi); close() chỉ unsubscribe.
  */
 
-import { BehaviorSubject, Subject, Subscription, of, merge, fromEvent, timer, throwError, firstValueFrom, switchMap, tap, map, filter, finalize, retry } from "rxjs";
+import { BehaviorSubject, Subject, Subscription, defer, from, merge, fromEvent, timer, throwError, firstValueFrom, switchMap, tap, map, filter, finalize, retry } from "rxjs";
 import { ChatGPTClient } from "../chatgpt";
 import type { Account } from "../../schemas";
 import type {
@@ -56,6 +56,9 @@ export class WebsocketRelay {
     private account: Account,
     private enrollment: RCEnrollment,
     readonly envId: string,
+    /** Lấy remote-control token TƯƠI cho mỗi lần (re)connect. Token relay hết hạn ~10 phút;
+     *  baked-in token tĩnh sẽ làm reconnect thất bại sau khi hết hạn. Mặc định = token enrollment tĩnh. */
+    private getToken: () => Promise<string> = async () => this.enrollment.token,
   ) {}
 
   // ─── Connection ───────────────────────────────────────────────────────────────
@@ -71,13 +74,13 @@ export class WebsocketRelay {
     this.#lastError = undefined;
     this.status$.next("connecting");
 
-    this.subscription = of(1)                                                    // 1. of(1) kích hoạt
+    this.subscription = defer(() => from(this.getToken()))                       // 1. lấy token tươi mỗi (re)subscribe (retry → gọi lại getToken)
       .pipe(
-        switchMap(() => {                                                        // 2. switchMap(() => new WebSocket) + merge lắng nghe
+        switchMap((token) => {                                                   // 2. switchMap(token => new WebSocket) + merge lắng nghe
           // new WebSocket — lazy mỗi (re)subscribe ⇒ retry tạo socket tươi (header auth + stream_id mới).
           this.streamId = crypto.randomUUID();
           const headers = ChatGPTClient.buildWebSocketHeaders(undefined, this.account);
-          headers["x-codex-client-session-token"] = `Bearer ${this.enrollment.token}`;
+          headers["x-codex-client-session-token"] = `Bearer ${token}`;
           headers["x-codex-client-id"] = this.enrollment.clientId;
           headers["x-codex-protocol-version"] = String(PROTOCOL_VERSION);
           // @ts-ignore Bun extension: headers
@@ -202,26 +205,39 @@ export class WebsocketRelay {
 
     if (msg.type === "server_message") {
       const rpcMsg = msg.message as Record<string, unknown> | undefined;
-      const id = rpcMsg?.id as string | undefined;
+      const rawId = rpcMsg?.id;
+      const hasId = typeof rawId === "string" || typeof rawId === "number";
+      const id = hasId ? String(rawId) : undefined;
 
       if (!id) {
         const method = rpcMsg?.method as string | undefined ?? "";
         const params = (rpcMsg?.params ?? {}) as Record<string, unknown>;
-        // Relay echo event của 1 turn trên NHIỀU stream (host/mobile/proxy...). Khoá mỗi
-        // turnId vào stream đầu tiên thấy nó → bỏ qua các stream khác (chống nhân đôi delta).
+        // Relay echo delta của 1 turn trên NHIỀU stream (host/mobile/proxy...). Chỉ khoá
+        // các event delta vì chúng không idempotent; status/approval/item-completed phải
+        // luôn đi qua để UI không mất trạng thái "awaiting approval" khi nó đến từ stream khác.
         const turnId = (params.turnId
           ?? (params.turn as Record<string, unknown> | undefined)?.id
           ?? (params.item as Record<string, unknown> | undefined)?.turnId) as string | undefined;
         const streamId = String(msg.stream_id ?? "");
-        if (turnId && streamId) {
+        if (turnId && streamId && this.#isDuplicateSensitiveNotification(method)) {
           const locked = this.turnStreamLock.get(turnId);
           if (!locked) this.turnStreamLock.set(turnId, streamId);
           else if (locked !== streamId) return; // stream khác cho cùng turn → drop
         }
         // event$ = kênh chung (subscriber demux); chats$ = kênh đã lọc theo threadId (shellCommand).
-        const ev: RelayEvent = { method, params, envId: String(msg.env_id ?? "") };
+        const ev: RelayEvent = { method, params, envId: String(msg.env_id ?? ""), seqId: Number(msg.seq_id), streamId: String(msg.stream_id ?? "") };
         this.event$.next(ev);
-        const threadId = String(params.threadId ?? "");
+        const threadId = this.#relayThreadId(params);
+        if (threadId) this.chats$.get(threadId)?.next(ev);
+        return;
+      }
+
+      const method = rpcMsg?.method as string | undefined;
+      if (method) {
+        const params = (rpcMsg?.params ?? {}) as Record<string, unknown>;
+        const ev: RelayEvent = { id: rawId as string | number, method, params, envId: String(msg.env_id ?? ""), seqId: Number(msg.seq_id), streamId: String(msg.stream_id ?? "") };
+        this.event$.next(ev);
+        const threadId = this.#relayThreadId(params);
         if (threadId) this.chats$.get(threadId)?.next(ev);
         return;
       }
@@ -237,6 +253,29 @@ export class WebsocketRelay {
         p.resolve(rpcMsg?.result ?? rpcMsg);
       }
     }
+  }
+
+  #isDuplicateSensitiveNotification(method: string): boolean {
+    const m = method.toLowerCase();
+    return m.includes("delta");
+  }
+
+  #relayThreadId(params: Record<string, unknown>): string {
+    const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+      value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    const item = asRecord(params.item);
+    const turn = asRecord(params.turn);
+    const thread = asRecord(params.thread);
+    return String(
+      params.threadId ??
+      params.thread_id ??
+      item?.threadId ??
+      item?.thread_id ??
+      turn?.threadId ??
+      turn?.thread_id ??
+      thread?.id ??
+      ""
+    );
   }
 
   #rejectAll(err: Error) {
@@ -284,9 +323,8 @@ export class WebsocketRelay {
     if (text) input.push({ type: "text", text, text_elements: [] });
     // Ảnh đính kèm: gửi inline base64 (định dạng input item Codex hỗ trợ).
     for (const img of opts?.images ?? []) input.push({ type: "image", data: img.data, mimeType: img.mimeType });
-    const params: Record<string, unknown> = {
-      threadId: opts?.threadId ?? null,
-      input,
+    // Params chung (KHÔNG kèm threadId/input — set riêng cho từng RPC).
+    const base: Record<string, unknown> = {
       cwd: opts?.workspaceRoot ?? null,
       model: opts?.model ?? null,
       approvalPolicy: opts?.approvalPolicy ?? "on-request",
@@ -299,19 +337,36 @@ export class WebsocketRelay {
       effort: null,
       serviceTier: null,
     };
-    // Thread có sẵn → turn/start (gửi message vào thread; thread/resume chỉ LOAD chứ không submit).
-    // Thread mới → thread/start (tạo thread kèm turn đầu).
-    if (opts?.threadId) {
-      // đảm bảo thread đã được load trước khi mở turn mới
-      await this.request("thread/resume", { threadId: opts.threadId }, opts?.envId).catch(() => {});
+
+    let threadId = opts?.threadId ?? "";
+    if (!threadId) {
+      // Thread MỚI: thread/start CHỈ tạo thread rỗng (turns:[]) — KHÔNG submit message dù truyền input.
+      const startRes = (await this.request("thread/start", { threadId: null, input: [], ...base }, opts?.envId)) as Record<string, unknown>;
+      const thread = startRes?.thread as Record<string, unknown> | undefined;
+      threadId = String(thread?.id ?? startRes?.threadId ?? startRes?.conversationId ?? "");
+      if (!threadId) throw new Error("[rc] thread/start returned no threadId");
     }
-    const method = opts?.threadId ? "turn/start" : "thread/start";
-    const result = (await this.request(method, params, opts?.envId)) as Record<string, unknown>;
-    const thread = result?.thread as Record<string, unknown> | undefined;
-    const turn = result?.turn as Record<string, unknown> | undefined;
-    const threadId = String(thread?.id ?? result?.threadId ?? result?.conversationId ?? opts?.threadId ?? "");
-    const turnId = String(turn?.id ?? result?.turnId ?? "");
+    // LOAD thread trước khi turn/start — kể cả thread MỚI. Nếu turn/start chạy ngay sau thread/start
+    // (rollout chưa sẵn sàng) thì host trả status "systemError" và agent không chạy. Với thread mới
+    // resume báo "no rollout found" (bỏ qua) nhưng vẫn cần để thread sẵn sàng nhận turn.
+    await this.request("thread/resume", { threadId }, opts?.envId).catch(() => {});
+
+    // Submit turn (cho cả thread mới lẫn cũ) — đây mới là bước khiến agent chạy.
+    const turnRes = (await this.request("turn/start", { threadId, input, ...base }, opts?.envId)) as Record<string, unknown>;
+    const turn = turnRes?.turn as Record<string, unknown> | undefined;
+    const turnId = String(turn?.id ?? turnRes?.turnId ?? "");
     return { threadId, turnId };
+  }
+
+  async steerMessage(
+    text: string,
+    opts: { threadId: string; images?: { data: string; mimeType: string }[]; envId?: string }
+  ): Promise<{ threadId: string }> {
+    const input: unknown[] = [];
+    if (text) input.push({ type: "text", text, text_elements: [] });
+    for (const img of opts.images ?? []) input.push({ type: "image", data: img.data, mimeType: img.mimeType });
+    await this.request("thread/resume", { threadId: opts.threadId, input }, opts.envId);
+    return { threadId: opts.threadId };
   }
 
   async shellCommand(
@@ -403,11 +458,125 @@ export class WebsocketRelay {
     return Array.isArray(items) ? items as any[] : [];
   }
 
-  async approveAction(threadId: string, opts?: { reject?: boolean }, envId?: string): Promise<void> {
-    await this.request("thread/approveGuardianDeniedAction", {
-      threadId,
-      decision: opts?.reject ? "reject" : "approve",
-    }, envId);
+  async readThread(threadId: string, envId?: string): Promise<Record<string, unknown>> {
+    const rd = await this.request("thread/read", { threadId, includeTurns: true }, envId).catch(() => ({})) as Record<string, unknown>;
+    const thread = rd?.thread as Record<string, unknown> | undefined;
+    return thread ?? rd;
+  }
+
+  async readFileText(path: string, envId?: string): Promise<string> {
+    const result = await this.request("fs/readFile", { path }, envId) as Record<string, unknown>;
+    const dataBase64 = typeof result.dataBase64 === "string" ? result.dataBase64 : "";
+    if (!dataBase64) return "";
+    return Buffer.from(dataBase64, "base64").toString("utf8");
+  }
+
+  async respondApprovalEvent(event: Record<string, unknown>, decision: unknown, envId?: string): Promise<void> {
+    await this.respondRequestEvent(event, { decision }, envId);
+  }
+
+  async respondRequestEvent(event: Record<string, unknown>, result: Record<string, unknown>, envId?: string): Promise<void> {
+    this.connect();
+    await this.whenReady();
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("[rc] WebSocket not open");
+    const id = event.id;
+    if (typeof id !== "string" && typeof id !== "number") {
+      throw new Error("Remote approval request is missing request id; cannot send approval response");
+    }
+    ws.send(JSON.stringify({
+      type: "client_message",
+      client_id: this.enrollment.clientId,
+      seq_id: ++this.seqId,
+      env_id: envId ?? this.envId,
+      stream_id: this.streamId,
+      skip_history: false,
+      message: { id, result },
+    }));
+  }
+
+  async fetchPendingApprovalEvent(threadId: string, envId?: string, timeoutMs = 4_000): Promise<Record<string, unknown> | undefined> {
+    this.connect();
+    await this.whenReady();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (event?: Record<string, unknown>) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        sub.unsubscribe();
+        resolve(event);
+      };
+      const timeoutId = setTimeout(() => finish(), timeoutMs);
+      const sub = this.event$.subscribe((ev) => {
+        if (ev.envId !== (envId ?? this.envId)) return;
+        if (this.#relayThreadId(ev.params) !== threadId) return;
+        if (
+          ev.method !== "item/commandExecution/requestApproval" &&
+          ev.method !== "item/fileChange/requestApproval" &&
+          ev.method !== "item/tool/requestOptionPicker" &&
+          ev.method !== "item/tool/requestUserInput"
+        ) return;
+        finish({ id: ev.id, seqId: ev.seqId, streamId: ev.streamId, method: ev.method, params: ev.params });
+      });
+      this.request("thread/resume", { threadId }, envId).catch(() => {});
+    });
+  }
+
+  async approveAction(
+    threadId: string,
+    opts?: {
+      reject?: boolean;
+      event?: Record<string, unknown>;
+      persist?: boolean;
+      selectedOption?: string;
+      freeformAnswer?: string;
+    },
+    envId?: string,
+  ): Promise<void> {
+    const event = opts?.event ?? await this.fetchPendingApprovalEvent(threadId, envId);
+    if (!event) throw new Error("Missing approval event; reload the chat to fetch the pending approval details");
+    const method = typeof event?.method === "string" ? event.method : "";
+    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+      const decision = opts?.reject
+        ? "decline"
+        : opts?.persist
+          ? "acceptForSession"
+          : "accept";
+      await this.respondApprovalEvent(event, decision, envId);
+      return;
+    }
+    if (method === "item/tool/requestOptionPicker") {
+      const selectedOptions = typeof opts?.selectedOption === "string"
+        ? opts.selectedOption.split("\n").map((option) => option.trim()).filter(Boolean)
+        : [];
+      const freeformAnswer = typeof opts?.freeformAnswer === "string" && opts.freeformAnswer.trim()
+        ? opts.freeformAnswer.trim()
+        : null;
+      await this.respondRequestEvent(event, {
+        action: opts?.reject && !freeformAnswer ? "skip" : "submit",
+        selectedOptions,
+        freeformAnswer,
+      }, envId);
+      return;
+    }
+    if (method === "item/tool/requestUserInput") {
+      const params = event.params && typeof event.params === "object" && !Array.isArray(event.params)
+        ? event.params as Record<string, unknown>
+        : {};
+      const questions = Array.isArray(params.questions) ? params.questions : [];
+      const question = questions.find((q) => q && typeof q === "object" && !Array.isArray(q)) as Record<string, unknown> | undefined;
+      const questionId = typeof question?.id === "string" && question.id ? question.id : "response";
+      const answer = typeof opts?.freeformAnswer === "string" && opts.freeformAnswer.trim()
+        ? opts.freeformAnswer.trim()
+        : typeof opts?.selectedOption === "string" && opts.selectedOption.trim()
+          ? opts.selectedOption.trim()
+          : "";
+      const answers = answer ? { [questionId]: { answers: [answer] } } : {};
+      await this.respondRequestEvent(event, { answers }, envId);
+      return;
+    }
+    await this.request("thread/approveGuardianDeniedAction", { threadId, event }, envId);
   }
 
   async stopThread(threadId: string, envId?: string): Promise<void> {

@@ -28,6 +28,7 @@ export type AccountDoc = Doc<{
   chatgptPlanType?: string;
   selected?: boolean;
   enrolled?: boolean;
+  enrollStatus?: "none" | "enrolling" | "ready";
 }>;
 
 export type ReportDoc = Doc<{
@@ -64,6 +65,7 @@ export type HostDoc = Doc<{
 export type ChatDoc = Doc<{
   title?: string;
   status?: string;
+  remote_status?: string;
   environment_id?: string;
   workspace_root?: string;
   created_at?: string;

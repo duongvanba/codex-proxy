@@ -34,12 +34,18 @@ export class TurnsController extends Hono {
   private async handleTurns(ctx: LivequeryContext): Promise<Response> {
     if (ctx.request.method !== "GET") return error("METHOD_NOT_ALLOWED", "Turns collection only supports GET", 405);
     const accountId = String(ctx.livequery?.keys?.account_id ?? "");
+    const hostId = String(ctx.livequery?.keys?.host_id ?? "");
     const chatId = String(ctx.livequery?.keys?.chat_id ?? "");
     if (!accountId || !chatId) return error("BAD_REQUEST", "Missing account_id or chat_id", 400);
     const account = this.accounts.getAccounts().find((a) => a.id === accountId);
     if (!account) return error("NOT_FOUND", "Account not found", 404);
 
-    // Recover sau restart: tìm trong hostChatsCache nếu chưa có trong localChats
+    // Recover sau reload/direct URL: route host-scoped đã có đủ hostId, không cần chờ hostChatsCache warm.
+    if (!this.store.localChats.has(chatId) && hostId) {
+      this.store.localChats.set(chatId, { accountId, hostId, conversationId: chatId });
+    }
+
+    // Recover sau restart từ account-scoped route: tìm trong hostChatsCache nếu chưa có trong localChats.
     if (!this.store.localChats.has(chatId)) {
       for (const [key, docs] of this.store.hostChatsCache.entries()) {
         const [cacheAccountId, cacheHostId] = key.split(":");

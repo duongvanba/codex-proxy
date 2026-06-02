@@ -1,4 +1,5 @@
 import type { AccountsService } from "./accounts";
+import type { AccountService } from "./account-service";
 import type { WatcherService } from "./watcher";
 import type { Account } from "../schemas";
 import { ChatGPTClient, CHATGPT_BASE, CODEX_RESPONSES_PATH, type TokenUsage } from "../libs/chatgpt";
@@ -86,6 +87,7 @@ type AccountSwitchCallback = (event: AccountSwitchEvent) => void;
 
 export class ProxyService {
   constructor(
+    private readonly accountService: AccountService,
     private readonly accounts: AccountsService,
     private readonly watcher: WatcherService,
     private readonly upstream: UpstreamProxy
@@ -397,7 +399,7 @@ export class ProxyService {
     onAccountSwitch?: AccountSwitchCallback,
     retries = 0
   ): Promise<Response> {
-    const account = this.accounts.getActiveAccount();
+    const account = this.accountService.pickForProxy();
     if (!account) {
       return new Response(
         JSON.stringify({
@@ -594,7 +596,7 @@ export class ProxyService {
     email: string;
     accountId: string;
   } | null {
-    const account = this.accounts.getActiveAccount();
+    const account = this.accountService.pickForProxy();
     if (!account) return null;
 
     const url = new URL(req.url);

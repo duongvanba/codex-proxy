@@ -4,14 +4,16 @@ import { useWorkspace } from "@context/workspace-context";
 
 export default function Page() {
   const { accountId, hostId } = useParams<{ accountId: string; hostId: string }>();
-  const { pendingEnvId, onChatCreated } = useWorkspace();
+  const { pendingEnvId, pendingCwd, onChatCreated, setChatScrolledUp } = useWorkspace();
 
   return (
     <ChatPanel
       accountId={accountId!}
       chatId={null}
       environmentId={pendingEnvId ?? `selfhost:${hostId}`}
+      cwd={pendingCwd ?? undefined}
       onChatCreated={onChatCreated}
+      onScrolledUpChange={setChatScrolledUp}
     />
   );
 }
