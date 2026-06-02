@@ -6,8 +6,8 @@ import type { AuthService } from "../libs/openai";
 
 // ─── Module-level constants ───────────────────────────────────────────────────
 
-const ACCOUNTS_FILE = join(import.meta.dir, "..", "..", "..", "..", "accounts.json");
-const ACCOUNT_STATE_FILE = join(import.meta.dir, "..", "..", "..", "..", "account-state.json");
+const ACCOUNTS_FILE = join(process.env.DATA_DIR ?? process.cwd(), "accounts.json");
+const ACCOUNT_STATE_FILE = join(process.env.DATA_DIR ?? process.cwd(), "account-state.json");
 const DEFAULT_DAILY_LIMIT = readLimit("CODEX_DAILY_LIMIT", 100);
 const DEFAULT_WEEKLY_LIMIT = readLimit("CODEX_WEEKLY_LIMIT", 500);
 const CODEX_USAGE_TTL_MS = readLimit("CODEX_USAGE_TTL_SECONDS", 60) * 1000;

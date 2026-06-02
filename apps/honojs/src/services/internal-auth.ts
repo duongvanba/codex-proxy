@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from "crypto";
 import type { Account } from "../schemas";
 import { serializeAccount } from "./livequery";
 
-const INTERNAL_AUTH_FILE = join(import.meta.dir, "..", "..", "..", "..", "internal-auth.json");
+const INTERNAL_AUTH_FILE = join(process.env.DATA_DIR ?? process.cwd(), "internal-auth.json");
 const TOKEN_TTL_SECONDS = Number(process.env.INTERNAL_JWT_TTL_SECONDS ?? 15 * 60);
 // Refresh token sống 1 tháng (~30 ngày) theo yêu cầu, có thể override qua env.
 const REFRESH_TTL_SECONDS = Number(process.env.INTERNAL_REFRESH_TTL_SECONDS ?? 30 * 24 * 60 * 60);

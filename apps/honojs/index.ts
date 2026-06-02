@@ -37,7 +37,7 @@ import type { LivequeryDeps } from "./src/controllers/_livequery";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PROXY_PORT ?? "9878");
-const LIVEQUERY_WS_PORT = parseInt(process.env.LIVEQUERY_WS_PORT ?? "9879");
+const LIVEQUERY_WS_PORT = parseInt(process.env.LIVEQUERY_WS_PORT ?? "9879"); // kept for fallback; unused when external mode active
 const CERTS_DIR = join(import.meta.dir, "certs");
 const TLS_CERT = join(CERTS_DIR, "localhost.crt");
 const TLS_KEY = join(CERTS_DIR, "localhost.key");
@@ -58,8 +58,9 @@ const upstream = new UpstreamProxy();
 const codexApi = new CodexApiService();
 const sseStream = new SseStreamService();
 
-// LiveQuery WebSocket Gateway (sync socket) — tạo sớm để AccountService nhận trực tiếp.
-const websocketGateway = new WebsocketGateway(LIVEQUERY_WS_PORT);
+// LiveQuery WebSocket Gateway — chạy "external" mode, Bun.serve sẽ inject WS trực tiếp
+// vào gateway qua attachBunUpgrade/getBunWebsocketHandlers, không mở port riêng 9879.
+const websocketGateway = new WebsocketGateway("external");
 
 const accounts = new AccountsService(auth);
 const watcher = new WatcherService(accounts);
@@ -96,14 +97,6 @@ const tokenAutoRefresh = accountService.startTokenAutoRefresh(TOKEN_AUTO_REFRESH
 // Tự reload quota nền cho mọi account (mặc định mỗi 30s) để UI/selection không lệ thuộc thao tác tay.
 const QUOTA_AUTO_RELOAD_INTERVAL_MS = Math.max(10, Number(process.env.ACCOUNT_QUOTA_AUTO_RELOAD_INTERVAL_SECONDS ?? 30)) * 1000;
 const quotaAutoReload = accountService.startQuotaAutoReload(QUOTA_AUTO_RELOAD_INTERVAL_MS);
-
-watcher.watchCodexAuth(({ email, isNew }) => {
-  const evtType = isNew ? "account_added" : "account_updated";
-  console.log(`[server] auth.json → ${isNew ? "NEW account" : "token refresh"}: ${email}`);
-  logger.logEvent(evtType, email);
-  broadcast.broadcastLog({ type: evtType, email, timestamp: Date.now() });
-  lqStore.notifyAccountsChanged();
-});
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 async function shutdown(signal: string) {
@@ -161,7 +154,34 @@ const webController = new WebController(lqStore, enrollment);
 const proxyController = new ProxyController(proxy, broadcast, logger, lqStore, unsupportedRoutes);
 const websocketController = new WebsocketController(accounts, broadcast, logger, lqStore);
 
+// ─── Static file serving (production mode) ───────────────────────────────────
+const STATIC_DIR = process.env.STATIC_DIR ?? "";
+
+async function serveStatic(pathname: string): Promise<Response> {
+  // strip query string, decode URI
+  const clean = decodeURIComponent(pathname.split("?")[0]);
+  // try exact path, then index.html fallback (SPA)
+  for (const candidate of [clean, "/index.html"]) {
+    const file = Bun.file(join(STATIC_DIR, candidate));
+    if (await file.exists()) {
+      return new Response(file, {
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          ...(candidate !== clean ? {} : {
+            "Cache-Control": clean.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache",
+          }),
+        },
+      });
+    }
+  }
+  // fallback to index.html for SPA routing
+  const index = Bun.file(join(STATIC_DIR, "index.html"));
+  if (await index.exists()) return new Response(index, { headers: { "Content-Type": "text/html" } });
+  return new Response("Not found", { status: 404 });
+}
+
 function proxyFrontendRequest(req: Request): Promise<Response> {
+  if (STATIC_DIR) return serveStatic(new URL(req.url).pathname);
   const url = new URL(req.url);
   const target = `${FRONTEND_DEV_ORIGIN}${url.pathname}${url.search}`;
   const headers = new Headers(req.headers);
@@ -215,7 +235,7 @@ Bun.serve<WsData>({
     const isWebSocketUpgrade = req.headers.get("upgrade")?.toLowerCase() === "websocket";
 
     if (path === "/livequery/realtime-updates" && isWebSocketUpgrade) {
-      const upgraded = server.upgrade(req, { data: { kind: "livequery" } });
+      const upgraded = websocketGateway.attachBunUpgrade(req, server);
       if (upgraded) return;
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
@@ -238,7 +258,7 @@ Bun.serve<WsData>({
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
 
-    if (isWebSocketUpgrade && shouldProxyFrontendPath(path)) {
+    if (!STATIC_DIR && isWebSocketUpgrade && shouldProxyFrontendPath(path)) {
       const frontendUrl = new URL(FRONTEND_DEV_ORIGIN);
       const upstreamUrl = `${frontendUrl.protocol === "https:" ? "wss:" : "ws:"}//${frontendUrl.host}${url.pathname}${url.search}`;
       const upgraded = server.upgrade(req, { data: { kind: "frontend", upstreamUrl } });
@@ -256,9 +276,21 @@ Bun.serve<WsData>({
   },
 
   websocket: {
-    open(ws) { websocketController.handleWsOpen(ws as any); },
-    message(ws, message) { websocketController.handleWsMessage(ws as any, message as any); },
-    close(ws, code, reason) { websocketController.handleWsClose(ws as any, code, reason); },
+    open(ws) {
+      const lqHandlers = websocketGateway.getBunWebsocketHandlers();
+      if ((ws.data as any)?._livequery) { lqHandlers.open(ws); return; }
+      websocketController.handleWsOpen(ws as any);
+    },
+    message(ws, message) {
+      const lqHandlers = websocketGateway.getBunWebsocketHandlers();
+      if ((ws.data as any)?._livequery) { lqHandlers.message(ws, message as any); return; }
+      websocketController.handleWsMessage(ws as any, message as any);
+    },
+    close(ws, code, reason) {
+      const lqHandlers = websocketGateway.getBunWebsocketHandlers();
+      if ((ws.data as any)?._livequery) { lqHandlers.close(ws); return; }
+      websocketController.handleWsClose(ws as any, code, reason);
+    },
   },
 });
 
@@ -268,7 +300,7 @@ console.log(`
 ║         Codex Proxy Manager              ║
 ╠══════════════════════════════════════════╣
 ║  API    : ${OPENAI_BASE_URL}
-║  LQ WS  : ws://localhost:${LIVEQUERY_WS_PORT}/livequery/realtime-updates
+║  LQ WS  : ws://localhost:${PORT}/livequery/realtime-updates
 ║  Web UI : http://localhost:9000 (Remix)
 ║  TLS    : ${USE_TLS ? "✓ enabled" : "✗ disabled (HTTP only)"}
 ╚══════════════════════════════════════════╝

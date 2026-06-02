@@ -4,14 +4,17 @@
   "private": true,
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev":          "concurrently \"bun run dev:server\" \"bun run dev:web\"",
-    "dev:server":   "bun --watch apps/honojs/index.ts",
-    "dev:web":      "bun run --cwd apps/remix-v2 dev",
-    "start:server": "bun apps/honojs/index.ts",
-    "build:web":    "bun run --cwd apps/remix-v2 build",
-    "build:types":  "tsc --build packages/types",
-    "typecheck":    "tsc --build",
-    "test":         "bun test apps/honojs"
+    "dev":            "concurrently \"bun run dev:server\" \"bun run dev:web\"",
+    "dev:server":     "bun --watch apps/honojs/index.ts",
+    "dev:web":        "bun run --cwd apps/remix-v2 dev",
+    "start:server":   "bun apps/honojs/index.ts",
+    "build:types":    "tsc --build packages/types",
+    "build:web":      "bun run --cwd apps/remix-v2 build",
+    "build:server":   "bun build --target=bun --minify apps/honojs/index.ts --outfile dist/server.js",
+    "build":          "bun run build:web && bun run build:server && cp -r apps/remix-v2/build/client dist/public",
+    "start":          "STATIC_DIR=./dist/public DATA_DIR=. bun run dist/server.js",
+    "typecheck":      "tsc --build",
+    "test":           "bun test apps/honojs"
   },
   "devDependencies": {
     "@types/bun": "latest",

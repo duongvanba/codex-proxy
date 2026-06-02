@@ -26,7 +26,7 @@ export interface WsData {
   frontendQueue?: Array<string | Buffer | ArrayBuffer>;
 }
 
-const WS_RESPONSE_LOG_FILE = join(import.meta.dir, "../../../logs", "websocket-responses.ndjson");
+const WS_RESPONSE_LOG_FILE = join(process.env.DATA_DIR ?? process.cwd(), "logs", "websocket-responses.ndjson");
 
 // ─── Controller ───────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ export class WebsocketController {
 
   private writeLog(entry: Record<string, unknown>): void {
     try {
-      mkdirSync(join(import.meta.dir, "../../../logs"), { recursive: true });
+      mkdirSync(join(process.env.DATA_DIR ?? process.cwd(), "logs"), { recursive: true });
       appendFileSync(WS_RESPONSE_LOG_FILE, `${JSON.stringify(entry)}\n`);
     } catch {
       // diagnostic only

@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 
-const LOG_DIR = join(import.meta.dir, "..", "..", "logs");
+const LOG_DIR = join(process.env.DATA_DIR ?? process.cwd(), "logs");
 const LOG_FILE = join(LOG_DIR, "requests.log");
 
 // ─── LoggerService ────────────────────────────────────────────────────────────
