@@ -132,16 +132,6 @@ const jwtMiddleware = async (c: any, next: any) => {
   return next();
 };
 
-const internalJwtMiddleware = async (c: any, next: any) => {
-  const token = (c.req.header("authorization") ?? "").match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
-  const gate = await internalAuth.validate(token);
-  if (!gate.ok) {
-    console.warn(`[internal-gate] DENY ${c.req.method} ${c.req.path} → ${gate.status} ${gate.error}`);
-    return c.json({ error: { message: gate.error, type: "forbidden" } }, gate.status as any);
-  }
-  return next();
-};
-
 app.use("/v1/*", async (c, next) => {
   if (c.req.path === "/v1/models") return next();
   return jwtMiddleware(c, next);
@@ -210,7 +200,7 @@ function shouldProxyFrontendPath(path: string): boolean {
 // Mount: web → từng LiveQuery collection controller → proxy (fallback "*" phải nằm cuối)
 app.route("/", webController);
 app.route("/", new AuthController(accounts, internalAuth));
-app.use("/livequery/*", internalJwtMiddleware);
+// User auth đã gỡ: các LiveQuery API không còn yêu cầu internal JWT (đăng nhập thẳng).
 app.route("/", new AccountsController(lqStore, accounts, accountService, enrollment, loginFlow, logger, configPatcher, codexApi, registry, lqDeps));
 app.route("/", new ReportsController(lqStore, lqDeps));
 app.route("/", new HostsController(lqStore, accounts, registry, lqDeps));

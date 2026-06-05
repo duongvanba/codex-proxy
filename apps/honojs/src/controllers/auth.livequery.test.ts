@@ -33,12 +33,12 @@ function makeMultiController(internalAuth: InternalAuthService) {
 }
 
 describe("AuthController refresh-token cookie", () => {
-  test("refresh thiếu cookie -> 401 lỗi", async () => {
+  test("refresh thiếu cookie -> auto-login cấp token (không còn màn login)", async () => {
     const app = makeController(new InternalAuthService());
     const res = await app.request("/auth-api/refresh", { method: "POST" });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.error.message).toContain("Missing refresh token");
+    expect(body.data.jwt).toBeTruthy();
   });
 
   test("refresh với cookie hợp lệ -> cấp access token mới", async () => {
@@ -54,13 +54,15 @@ describe("AuthController refresh-token cookie", () => {
     expect(body.data.jwt).toBeTruthy();
   });
 
-  test("refresh với token rác -> 401", async () => {
+  test("refresh với token rác -> auto-login cấp token", async () => {
     const app = makeController(new InternalAuthService());
     const res = await app.request("/auth-api/refresh", {
       method: "POST",
       headers: { cookie: "refresh_token=not-a-real-token" },
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.data.jwt).toBeTruthy();
   });
 
   test("logout xoá refresh_token cookie (Max-Age=0)", async () => {
@@ -72,7 +74,7 @@ describe("AuthController refresh-token cookie", () => {
     expect(setCookie).toContain("Max-Age=0");
   });
 
-  test("refresh token bị thu hồi sau logout (sessionVersion đổi)", async () => {
+  test("refresh sau logout (cookie bị thu hồi) -> vẫn auto-login (user auth đã gỡ)", async () => {
     const internalAuth = new InternalAuthService();
     const refresh = await internalAuth.issueRefreshToken(ACCOUNTS);
     internalAuth.logout();
@@ -81,9 +83,9 @@ describe("AuthController refresh-token cookie", () => {
       method: "POST",
       headers: { cookie: `refresh_token=${encodeURIComponent(refresh.token)}` },
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.error.message).toContain("revoked");
+    expect(body.data.jwt).toBeTruthy();
   });
 });
 

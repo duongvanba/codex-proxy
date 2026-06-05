@@ -6,6 +6,6 @@
   "types": "./index.ts",
   "private": true,
   "dependencies": {
-    "@livequery/client": "2.0.140"
+    "@livequery/client": "2.0.145"
   }
 }

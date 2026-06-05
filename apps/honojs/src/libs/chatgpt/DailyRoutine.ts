@@ -2,7 +2,7 @@ import type { AccountsService } from "../../services/accounts";
 import type { Account } from "../../schemas";
 
 const DEFAULT_TIME_ZONE = process.env.DAILY_ROUTINE_TIME_ZONE ?? "Asia/Ho_Chi_Minh";
-const DEFAULT_HOUR = readNumber("DAILY_ROUTINE_HOUR", 7);
+const DEFAULT_HOUR = readNumber("DAILY_ROUTINE_HOUR", 5);
 const DEFAULT_MINUTE = readNumber("DAILY_ROUTINE_MINUTE", 0);
 const DEFAULT_CONCURRENCY = readNumber("DAILY_ROUTINE_CONCURRENCY", 2);
 const DEFAULT_TIMEOUT_MS = readNumber("DAILY_ROUTINE_TIMEOUT_MS", 15_000);

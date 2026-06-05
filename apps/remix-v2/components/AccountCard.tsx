@@ -1,13 +1,11 @@
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import { type LivequeryDocument } from "@livequery/client";
 import { useAction, useObservable } from "@livequery/react";
 import {
   Badge, Box, Center, Flex, HStack, IconButton, Progress, Skeleton, Spinner, Stack, Text,
 } from "@chakra-ui/react";
 import { ActionError } from "@components/ActionError";
-import { HostModal } from "@components/HostModal";
 import { useAccounts } from "@context/accounts-context";
-import { useAuth, normalizeEmail } from "@context/auth-context";
 import { appStartedAt, formatReset, timeAgo } from "@/time";
 import type { AccountDoc, CodexUsageWindow, UsageWindow } from "@codex/types";
 
@@ -17,14 +15,6 @@ function SwitchIcon() {
       <circle cx="12" cy="12" r="9.5" />
       <line x1="7" y1="9.5" x2="16" y2="9.5" /><polyline points="13.5 7 16.5 9.5 13.5 12" />
       <line x1="17" y1="14.5" x2="8" y2="14.5" /><polyline points="10.5 12 7.5 14.5 10.5 17" />
-    </svg>
-  );
-}
-function ServerIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <rect x="2" y="2.5" width="12" height="4.5" rx="1.2" /><rect x="2" y="9" width="12" height="4.5" rx="1.2" />
-      <line x1="4.5" y1="4.75" x2="4.7" y2="4.75" /><line x1="4.5" y1="11.25" x2="4.7" y2="11.25" />
     </svg>
   );
 }
@@ -107,9 +97,6 @@ function isSwitchableAccount(account: AccountDoc) {
   return account.status !== "expired";
 }
 
-function normalizeAuthName(value?: string | null) {
-  return (value ?? "").trim().toLowerCase();
-}
 
 function planPalette(plan: string): string {
   const p = plan.toLowerCase();
@@ -120,18 +107,11 @@ function planPalette(plan: string): string {
 
 function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: boolean }) {
   const { accountsCollection } = useAccounts();
-  const { currentEmail, currentDisplayName } = useAuth();
   const accountAction = useAction(async (action: string, payload?: Record<string, unknown>) => {
     return await accountsCollection.trigger(action, payload);
   });
   const switchDisabled = accountAction.loading || !isSwitchableAccount(account);
-  const [hostModalOpen, setHostModalOpen] = useState(false);
-  // Nút host hiện khi email account TRÙNG email phiên login; ngoại lệ admin → luôn hiện.
-  const isCurrentAccount = currentEmail !== "" && normalizeEmail(account.email) === currentEmail;
-  const isSuperAdmin =
-    currentEmail === normalizeEmail("duongvanba.agency@gmail.com") ||
-    normalizeAuthName(currentDisplayName) === "duongvanba";
-  const showHostButton = isCurrentAccount || isSuperAdmin;
+  // HostModal đã được ẩn theo yêu cầu — không còn nút "Danh sách host (remote)".
 
   async function selectAccount() {
     await accountAction("select-account", { id: account.id });
@@ -159,11 +139,6 @@ function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: bo
             <SwitchIcon />
           </IconButton>
         )}
-        {showHostButton && (
-          <IconButton aria-label="Danh sách host (remote)" title="Danh sách host (remote)" variant="subtle" size="sm" onClick={() => setHostModalOpen(true)}>
-            <ServerIcon />
-          </IconButton>
-        )}
         {!isUsing && (
           <IconButton
             aria-label="Xoá account"
@@ -179,7 +154,6 @@ function AccountActions({ account, isUsing }: { account: AccountDoc; isUsing: bo
         )}
       </HStack>
       <ActionError error={accountAction.error} />
-      {hostModalOpen && <HostModal accountId={account.id} onClose={() => setHostModalOpen(false)} />}
     </Stack>
   );
 }

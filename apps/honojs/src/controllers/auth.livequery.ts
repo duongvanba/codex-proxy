@@ -127,19 +127,20 @@ export class AuthController extends Hono {
   }
 
   private async refresh(req: Request): Promise<Response> {
-    // Bắt buộc phải có refresh token trong cookie, thiếu là báo lỗi.
+    // Còn refresh cookie hợp lệ → tôn trọng (giữ đúng account/passkey của phiên cũ).
     const refreshToken = readCookie(req, REFRESH_COOKIE);
     const validation = await this.internalAuth.validateRefreshToken(refreshToken);
-    if (!validation.ok) {
-      return Response.json({ error: { message: validation.error, type: "auth" } }, { status: validation.status });
+    if (validation.ok) {
+      if (validation.payload.auth_provider === "passkey") {
+        const account = this.accounts.getAccounts().find((a) => a.id === validation.payload.sub);
+        if (account) return Response.json({ data: await this.internalAuth.issueCurrentAccount(account, { auth_provider: "passkey", username: validation.payload.passkey_username }) });
+      } else {
+        return this.issueForCurrentAccounts(validation.payload.sub);
+      }
     }
-    // Giữ nguyên account của phiên (sub trong refresh token) — không rơi về account đầu danh sách.
-    if (validation.payload.auth_provider === "passkey") {
-      const account = this.accounts.getAccounts().find((a) => a.id === validation.payload.sub);
-      if (!account) return Response.json({ error: { message: "Passkey account is no longer available", type: "auth" } }, { status: 401 });
-      return Response.json({ data: await this.internalAuth.issueCurrentAccount(account, { auth_provider: "passkey", username: validation.payload.passkey_username }) });
-    }
-    return this.issueForCurrentAccounts(validation.payload.sub);
+    // Không có cookie / cookie hỏng / account passkey biến mất → đăng nhập thẳng (auto-login),
+    // không còn màn login. Account đầu danh sách làm phiên hiện hành.
+    return Response.json({ data: await this.internalAuth.issue(this.orderedAccounts()) });
   }
 
   private async logout(): Promise<Response> {

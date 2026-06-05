@@ -5,17 +5,17 @@
   "private": true,
   "module": "index.ts",
   "scripts": {
-    "dev":   "bun --watch index.ts",
+    "dev": "bun --watch index.ts",
     "start": "bun index.ts",
-    "test":  "bun test"
+    "test": "bun test"
   },
   "dependencies": {
     "@codex/types": "*",
-    "@livequery/core":   "file:../../../../opensource/livequery/core",
+    "@livequery/client": "2.0.145",
+    "@livequery/core": "file:../../../../opensource/livequery/core",
     "@livequery/honojs": "file:../../../../opensource/livequery/honojs",
-    "@livequery/client": "2.0.140",
-    "@livequery/react":  "2.0.140",
-    "@livequery/rest":   "2.0.140",
+    "@livequery/react": "2.0.145",
+    "@livequery/rest": "2.0.145",
     "hono": "^4.12.23",
     "rxjs": "^7.8.2"
   },

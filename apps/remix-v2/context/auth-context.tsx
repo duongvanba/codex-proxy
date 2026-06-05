@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "@remix-run/react";
 import { createContextFromHook, useAction, useObservable } from "@livequery/react";
 import { WORKER_SERVICES, useService, type AuthAccount, type AuthAccountState, type AuthApiResponseSession, type AuthSession } from "@/hooks/useWorkerService";
@@ -73,16 +73,23 @@ export const [useAuth, AuthProvider] = createContextFromHook(()  => {
   const beginPasskeyLogin = useAction(auth.beginPasskeyLogin);
   const finishPasskeyLogin = useAction(auth.finishPasskeyLogin);
 
+  const autoLoginAttempted = useRef(false);
   useEffect(() => {
     if (account.loading) return;
-    if (!authenticated && !onLoginPage) {
-      navigate("/auth/login", { replace: true });
+    // Không còn màn login: chưa có phiên thì tự đăng nhập thẳng (auto-login) đúng MỘT lần,
+    // không điều hướng tới /auth/login. Backend luôn cấp phiên cho account hiện hành.
+    // Lưu ý: auth.refresh() đi qua ServiceLinker trả về thenable (KHÔNG có .catch) →
+    // bọc Promise.resolve để có Promise thật rồi nuốt lỗi qua .then(_, onError).
+    if (!authenticated) {
+      if (!autoLoginAttempted.current) {
+        autoLoginAttempted.current = true;
+        void Promise.resolve(auth.refresh()).then(undefined, () => {});
+      }
       return;
     }
-    if (authenticated && onLoginPage) {
-      navigate("/", { replace: true });
-    }
-  }, [account.loading, authenticated, navigate, onLoginPage]);
+    autoLoginAttempted.current = false; // đã đăng nhập → cho phép auto-login lại nếu sau này mất phiên
+    if (onLoginPage) navigate("/", { replace: true });
+  }, [account.loading, authenticated, navigate, onLoginPage, auth]);
 
   return {
     ready: !account.loading,

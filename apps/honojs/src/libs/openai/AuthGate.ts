@@ -1,4 +1,4 @@
-const ALLOWED_PLANS = new Set(["plus", "pro", "max"]);
+const ALLOWED_PLANS = new Set(["free", "plus", "pro", "max"]);
 const JWKS_URL = "https://auth.openai.com/.well-known/jwks.json";
 const JWKS_TTL_MS = 60 * 60 * 1000;
 const EXPECTED_ISS = "https://auth.openai.com";
