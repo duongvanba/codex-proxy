@@ -32,8 +32,11 @@ echo "      ✓ dist/server.js ($(du -sh dist/server.js | cut -f1))"
 
 # ── Step 2: Rsync ──────────────────────────────────────────────────────────────
 echo "[2/3] Syncing to TrueNAS..."
-rsync -az dist/server.js "${TRUENAS_HOST}:${DIST_REMOTE}/"
-echo "      ✓ Synced"
+# Web build: sync dist/public/* vào thẳng dist/ (compose env STATIC_DIR=/app/dist, flat layout).
+# --delete dọn asset hash cũ; exclude server.js để không bị xóa trước khi sync ở bước kế tiếp.
+rsync -az --delete --exclude='server.js' dist/public/ "${TRUENAS_HOST}:${DIST_REMOTE}/"
+rsync -az dist/server.js "${TRUENAS_HOST}:${DIST_REMOTE}/server.js"
+echo "      ✓ Synced (server.js + web build)"
 
 # ── Step 3: Restart ────────────────────────────────────────────────────────────
 echo "[3/3] Restarting container..."
