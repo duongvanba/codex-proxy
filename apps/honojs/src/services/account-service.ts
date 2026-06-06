@@ -22,6 +22,8 @@ export type AccountSyncDocument = AccountDocument & { enrollStatus: EnrollStatus
  */
 export class AccountService {
   private knownAccountIds: Set<string>;
+  /** Hook do composition root inject — gọi sau khi đổi `selected` để đóng WS Codex dính account cũ. */
+  private sessionCloser: ((oldAccountId: string, reason: string) => void) | null = null;
 
   constructor(
     private readonly accounts: AccountsService,
@@ -61,12 +63,22 @@ export class AccountService {
    * limitReached) để `pickForProxy()` phục vụ account này NGAY. Upstream vẫn là nơi quyết định
    * 401/429 thực tế (nếu token chết, proxy sẽ tự refresh hoặc đổi account ở vòng request).
    */
-  switch(accountId: string): { ok: boolean; error?: string } {
+  switch(accountId: string, reason: string = "manual-switch"): { ok: boolean; error?: string } {
+    const oldId = this.accounts.getActiveAccount()?.id;
     const result = this.accounts.setSelectedAccount(accountId);
     if (!result.ok) return result;
     this.accounts.clearBlockedState(accountId);
     this.notifyChanged();
+    if (oldId && oldId !== accountId) {
+      try { this.sessionCloser?.(oldId, reason); }
+      catch (error) { console.error("[accounts] sessionCloser failed:", error instanceof Error ? error.message : error); }
+    }
     return { ok: true };
+  }
+
+  /** Composition root gọi sau khi tạo `WebsocketController` để inject hàm đóng WS Codex theo accountId. */
+  setSessionCloser(fn: (oldAccountId: string, reason: string) => void): void {
+    this.sessionCloser = fn;
   }
 
   // ─── 4) Chọn tài khoản phục vụ proxy ──────────────────────────────────────────────
@@ -128,6 +140,73 @@ export class AccountService {
         clearInterval(timer);
       },
     };
+  }
+
+  // ─── 7) Auto switch theo weekly remaining ───────────────────────────────────────
+
+  /**
+   * Định kỳ (mặc định 30 phút) reload quota rồi switch sang account còn weekly remaining
+   * nhiều nhất. Ưu tiên `codexUsage.secondaryWindow.usedPercent` thấp nhất (Codex API trả về,
+   * thường là cửa sổ 7 ngày); fallback `weeklyUsage` local nếu thiếu codexUsage.
+   *
+   * Set `intervalMs <= 0` ở caller để tắt.
+   */
+  startAutoSwitchByWeekly(intervalMs: number): { stop: () => void } {
+    let stopped = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        await this.fetchQuota();
+        const best = this.pickAccountByMaxWeeklyRemaining();
+        if (!best) {
+          console.log("[accounts] Auto-switch: no usable account, skip");
+          return;
+        }
+        const current = this.accounts.getActiveAccount();
+        if (current?.id === best.id) {
+          console.log(`[accounts] Auto-switch: ${best.email} đã là active, không cần đổi`);
+          return;
+        }
+        const result = this.switch(best.id, "auto-switched");
+        if (!result.ok) {
+          console.warn(`[accounts] Auto-switch failed: ${result.error}`);
+          return;
+        }
+        console.log(`[accounts] Auto-switched → ${best.email} (most weekly remaining)`);
+      } catch (error) {
+        console.error("[accounts] Auto-switch tick failed:", error instanceof Error ? error.message : error);
+      } finally {
+        inFlight = false;
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), intervalMs);
+    return {
+      stop: () => {
+        stopped = true;
+        clearInterval(timer);
+      },
+    };
+  }
+
+  /** Chọn account usable có weekly remaining nhiều nhất; null nếu không có account khả dụng. */
+  private pickAccountByMaxWeeklyRemaining(): Account | null {
+    const candidates = this.accounts.getSwitchCandidates();
+    const current = this.accounts.getActiveAccount();
+    const pool = current ? [current, ...candidates.filter((a) => a.id !== current.id)] : candidates;
+    if (pool.length === 0) return null;
+
+    const score = (a: Account): number => {
+      const secondary = a.codexUsage?.secondaryWindow;
+      if (secondary) return 100 - secondary.usedPercent; // 0..100, càng cao càng còn nhiều
+      const weekly = a.weeklyUsage;
+      if (weekly && weekly.limit > 0) return ((weekly.limit - weekly.count) / weekly.limit) * 100;
+      return 100; // không có dữ liệu → coi như còn full để không bị loại oan
+    };
+
+    return pool.reduce((best, a) => (score(a) > score(best) ? a : best));
   }
 
   // ─── Realtime sync (tự publish vào LiveQuery WS) ──────────────────────────────────

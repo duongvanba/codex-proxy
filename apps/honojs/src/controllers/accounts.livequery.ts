@@ -90,7 +90,7 @@ export class AccountsController extends Hono {
 
   private async handleAccounts(ctx: LivequeryContext): Promise<Response> {
     if (ctx.request.method !== "GET") return error("METHOD_NOT_ALLOWED", "Accounts collection only supports GET", 405);
-    const docs = await this.accountService.list({ pendingQuotaTimers: true });
+    const docs = await this.accountService.list();
     return json({ data: collectionResponse(docs, { collection: "accounts" }) });
   }
 

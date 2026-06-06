@@ -30,13 +30,44 @@ const WS_RESPONSE_LOG_FILE = join(process.env.DATA_DIR ?? process.cwd(), "logs",
 
 // ─── Controller ───────────────────────────────────────────────────────────────
 
+type CodexWs = { send(data: string | ArrayBuffer | Buffer): void; close(code?: number, reason?: string): void; data: WsData };
+
 export class WebsocketController {
+  /** Tập WS Codex đang active — phục vụ auto-switch force-close theo accountId. */
+  private readonly activeCodexWs = new Set<CodexWs>();
+
   constructor(
     private readonly accounts: AccountsService,
     private readonly broadcast: BroadcastService,
     private readonly logger: LoggerService,
     private readonly livequery: LivequeryStore
   ) {}
+
+  /**
+   * Force close mọi WS Codex đang gắn với `accountId` cũ. Gửi `response.failed` +
+   * `code: "connection_reset"` (cùng pattern với handleWsLimit) để Codex client tự
+   * retry với context — lần retry sẽ qua proxy → pick account mới.
+   * Trả về số WS đã đóng.
+   */
+  closeAccountSessions(accountId: string, reason: string = "auto-switch"): number {
+    let closed = 0;
+    for (const ws of [...this.activeCodexWs]) {
+      if (ws.data.accountId !== accountId) continue;
+      try {
+        ws.send(JSON.stringify({
+          type: "response.failed",
+          response: { status: "failed", error: { code: "connection_reset", message: `Upstream account ${reason}, please retry.` } },
+        }));
+      } catch {}
+      ws.data.suppressNextClose = true;
+      try { ws.data.upstream?.close(1000, reason); } catch {}
+      try { ws.close(1013, reason); } catch {}
+      this.activeCodexWs.delete(ws);
+      closed++;
+    }
+    if (closed > 0) console.log(`[ws] force-closed ${closed} Codex session(s) for account ${accountId} (${reason})`);
+    return closed;
+  }
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
@@ -273,6 +304,7 @@ export class WebsocketController {
       return;
     }
     console.log(`[ws] client connected [${ws.data.email}]`);
+    this.activeCodexWs.add(ws as CodexWs);
   }
 
   handleWsMessage(
@@ -339,6 +371,7 @@ export class WebsocketController {
     }
     console.log(`[ws] client disconnected: ${code} ${reason ?? ""} [${ws.data.email}]`);
     try { ws.data.upstream?.close(); } catch {}
+    this.activeCodexWs.delete(ws as CodexWs);
   }
 
   serializePayload(value: unknown): Record<string, unknown> {

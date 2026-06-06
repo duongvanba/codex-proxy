@@ -97,6 +97,7 @@ const tokenAutoRefresh = accountService.startTokenAutoRefresh(TOKEN_AUTO_REFRESH
 // Tự reload quota nền cho mọi account (mặc định mỗi 30s) để UI/selection không lệ thuộc thao tác tay.
 const QUOTA_AUTO_RELOAD_INTERVAL_MS = Math.max(10, Number(process.env.ACCOUNT_QUOTA_AUTO_RELOAD_INTERVAL_SECONDS ?? 30)) * 1000;
 const quotaAutoReload = accountService.startQuotaAutoReload(QUOTA_AUTO_RELOAD_INTERVAL_MS);
+// Auto-switch sẽ được start sau khi websocketController đã tạo (cần callback close session cũ).
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 async function shutdown(signal: string) {
@@ -105,6 +106,7 @@ async function shutdown(signal: string) {
   dailyRoutineScheduler.stop();
   tokenAutoRefresh.stop();
   quotaAutoReload.stop();
+  autoSwitch.stop();
   lqStore.close();
   websocketGateway.close();
   process.exit(0);
@@ -143,6 +145,16 @@ const lqDeps: LivequeryDeps = { websocketGateway, openaiBaseUrl: OPENAI_BASE_URL
 const webController = new WebController(lqStore, enrollment);
 const proxyController = new ProxyController(proxy, broadcast, logger, lqStore, unsupportedRoutes);
 const websocketController = new WebsocketController(accounts, broadcast, logger, lqStore);
+
+// Mỗi khi `accountService.switch()` (thủ công hoặc auto) đổi account, force close mọi WS Codex
+// của account cũ để Codex client tự reconnect + retry context qua account mới.
+accountService.setSessionCloser((oldId, reason) => { websocketController.closeAccountSessions(oldId, reason); });
+
+// Tự switch sang account còn weekly remaining nhiều nhất (mặc định 30 phút, set =0 để tắt).
+const AUTO_SWITCH_INTERVAL_SEC = Number(process.env.ACCOUNT_AUTO_SWITCH_INTERVAL_SECONDS ?? 1800);
+const autoSwitch = AUTO_SWITCH_INTERVAL_SEC > 0
+  ? accountService.startAutoSwitchByWeekly(Math.max(60, AUTO_SWITCH_INTERVAL_SEC) * 1000)
+  : { stop() {} };
 
 // ─── Static file serving (production mode) ───────────────────────────────────
 const STATIC_DIR = process.env.STATIC_DIR ?? "";
