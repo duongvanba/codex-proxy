@@ -298,6 +298,59 @@ bun test                # = bun test apps/honojs
 bun test apps/honojs
 ```
 
+## Deploy lên TrueNAS (Dockge)
+
+Production hiện chạy trên TrueNAS qua [Dockge](https://github.com/louislam/dockge), gom toàn bộ về **1 ZFS dataset** `d2/codex` → `/mnt/d2/codex`.
+
+### Layout
+
+```
+/mnt/d2/codex/                                  ← dataset d2/codex
+├── dist/                                       ← STATIC_DIR=/app/dist (FLAT, không phải dist/public)
+│   ├── server.js                               ← bundle backend (bun build)
+│   ├── index.html                              ← Remix SPA shell
+│   └── assets/                                 ← JS/CSS hash
+└── data/                                       ← DATA_DIR=/app/data
+    ├── accounts.json                           ← OAuth tokens (nhạy cảm)
+    ├── account-state.json                      ← runtime state + codexUsage
+    ├── internal-auth.json
+    └── logs/                                   ← request.log, websocket-responses.ndjson
+
+/mnt/d2/dockge/data/codex-proxy/compose.yaml    ← stack dockge (tên stack giữ `codex-proxy`)
+```
+
+> ⚠️ **`STATIC_DIR=/app/dist`** (KHÔNG có `/public`). Web build (`index.html`, `assets/`) phải nằm THẲNG trong `dist/`. `bun run build` có bug `cp -r build/client dist/public` lồng thư mục → script deploy rsync trực tiếp từ `apps/remix-v2/build/client/`, đừng tin `dist/public`.
+>
+> ⚠️ **Healthcheck dùng `bun -e fetch`**, KHÔNG dùng `curl` — image `oven/bun:1.3` không có curl, dùng curl sẽ làm container mãi `unhealthy` dù app chạy bình thường.
+
+### Lần đầu (one-time setup)
+
+```bash
+ssh truenas_admin@192.168.2.4
+sudo zfs create d2/codex
+sudo mkdir -p /mnt/d2/codex/data/logs /mnt/d2/codex/dist
+sudo chown -R truenas_admin:truenas_admin /mnt/d2/codex
+sudo mkdir -p /mnt/d2/dockge/data/codex-proxy
+# … tạo compose.yaml (xem docs/DEPLOY.sh phần FIRST-TIME SETUP) …
+# Seed accounts.json (nếu có sẵn)
+rsync -az accounts.json truenas_admin@192.168.2.4:/mnt/d2/codex/data/
+# Khởi động
+cd /mnt/d2/dockge/data/codex-proxy && sudo docker compose up -d
+```
+
+### Deploy hàng ngày
+
+```bash
+./docs/DEPLOY.sh
+```
+
+Script tự build → rsync server.js + web → `sudo docker restart codex-proxy` → curl `/health` xác nhận.
+
+Container chạy ở port `9876` ngoài, `8000` trong (proxy + LiveQuery WS dùng chung 1 port). Bind mount:
+
+- `/mnt/d2/codex/dist` → `/app/dist`
+- `/mnt/d2/codex/data` → `/app/data`
+
 ## Troubleshooting
 
 | Vấn đề | Giải pháp |
@@ -310,3 +363,5 @@ bun test apps/honojs
 | Token expired | Login lại từ Web UI hoặc để watcher tự import từ `~/.codex/auth.json` |
 | `401 Plan not allowed` | JWT có plan type không phải plus/pro/max |
 | `401 Signature verification failed` | Token bị sửa hoặc không phải do OpenAI ký |
+| Container `unhealthy` mãi nhưng app vẫn chạy | Healthcheck dùng `curl` — image bun không có. Đổi sang `bun -e fetch(...)` trong compose.yaml |
+| Web UI trắng / 404 asset sau deploy | Build artifact bị lồng `dist/public/client`. rsync trực tiếp từ `apps/remix-v2/build/client/` (xem `docs/DEPLOY.sh`) |

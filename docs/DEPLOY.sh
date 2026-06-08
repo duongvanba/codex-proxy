@@ -13,15 +13,16 @@
 #
 # Architecture:
 #   - Image  : oven/bun:1.3 (no custom build needed)
-#   - Runtime: dist/server.js mounted from host
-#   - Data   : accounts.json, logs/ in /mnt/d2/codex-proxy-data/
+#   - Dataset: d2/codex → /mnt/d2/codex
+#   - Runtime: /mnt/d2/codex/dist (server.js + web build, flat)
+#   - Data   : /mnt/d2/codex/data (accounts.json, account-state.json, logs/)
 #   - Port   : 9876 → 8000 (container)
 # =============================================================================
 
 set -euo pipefail
 
 TRUENAS_HOST="truenas_admin@192.168.2.4"
-DIST_REMOTE="/mnt/d2/codex-proxy-data/dist"
+DIST_REMOTE="/mnt/d2/codex/dist"
 
 echo "=== Codex Proxy — Deploy to TrueNAS ==="
 
@@ -32,9 +33,10 @@ echo "      ✓ dist/server.js ($(du -sh dist/server.js | cut -f1))"
 
 # ── Step 2: Rsync ──────────────────────────────────────────────────────────────
 echo "[2/3] Syncing to TrueNAS..."
-# Web build: sync dist/public/* vào thẳng dist/ (compose env STATIC_DIR=/app/dist, flat layout).
+# Web build: rsync flat từ apps/remix-v2/build/client/ vào dist/ (compose env STATIC_DIR=/app/dist).
+# Không dùng dist/public/ vì `bun run build` có bug lồng dist/public/client.
 # --delete dọn asset hash cũ; exclude server.js để không bị xóa trước khi sync ở bước kế tiếp.
-rsync -az --delete --exclude='server.js' dist/public/ "${TRUENAS_HOST}:${DIST_REMOTE}/"
+rsync -az --delete --exclude='server.js' apps/remix-v2/build/client/ "${TRUENAS_HOST}:${DIST_REMOTE}/"
 rsync -az dist/server.js "${TRUENAS_HOST}:${DIST_REMOTE}/server.js"
 echo "      ✓ Synced (server.js + web build)"
 
@@ -56,8 +58,10 @@ echo "  App : http://192.168.2.4:9876"
 # =============================================================================
 # ssh truenas_admin@192.168.2.4
 #
-# # Create directories
-# sudo mkdir -p /mnt/d2/codex-proxy-data/dist
+# # Create ZFS dataset + folders
+# sudo zfs create d2/codex
+# sudo mkdir -p /mnt/d2/codex/data/logs /mnt/d2/codex/dist
+# sudo chown -R truenas_admin:truenas_admin /mnt/d2/codex
 # sudo mkdir -p /mnt/d2/dockge/data/codex-proxy
 #
 # # Create compose stack
@@ -72,11 +76,11 @@ echo "  App : http://192.168.2.4:9876"
 #     ports:
 #       - '9876:8000'
 #     volumes:
-#       - /mnt/d2/codex-proxy-data/dist:/app/dist
-#       - /mnt/d2/codex-proxy-data:/app/data
+#       - /mnt/d2/codex/dist:/app/dist
+#       - /mnt/d2/codex/data:/app/data
 #     environment:
 #       - PROXY_PORT=8000
-#       - STATIC_DIR=/app/dist/public
+#       - STATIC_DIR=/app/dist
 #       - DATA_DIR=/app/data
 #     healthcheck:
 #       test: ['CMD-SHELL', 'curl -sf http://localhost:8000/health || exit 1']
@@ -86,8 +90,8 @@ echo "  App : http://192.168.2.4:9876"
 #       start_period: 10s
 # EOF
 #
-# # Copy accounts.json
-# # rsync -az accounts.json truenas_admin@192.168.2.4:/mnt/d2/codex-proxy-data/
+# # Seed accounts.json (lần đầu)
+# # rsync -az accounts.json truenas_admin@192.168.2.4:/mnt/d2/codex/data/
 #
 # # Start
 # cd /mnt/d2/dockge/data/codex-proxy && sudo docker compose up -d
