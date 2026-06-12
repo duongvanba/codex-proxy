@@ -3,8 +3,9 @@ import { BehaviorSubject } from "rxjs";
 import { useAction, useCollection, useObservable } from "@livequery/react";
 import { useEffect, useState } from "react";
 import {
-  Badge, Box, Button, Container, Flex, Heading, HStack, IconButton, Spinner, Stack, Text,
+  Badge, Box, Button, Container, Flex, Heading, HStack, IconButton, NativeSelectField, NativeSelectIndicator, NativeSelectRoot, Spinner, Stack, Text,
 } from "@chakra-ui/react";
+import type { AccountDoc } from "@codex/types";
 import { AccountCard } from "@components/AccountCard";
 import { ReportsPanel } from "@components/ReportsPanel";
 import { StatsGrid } from "@components/StatsGrid";
@@ -13,6 +14,35 @@ import { useAccounts, useAccountSnapshots } from "@context/accounts-context";
 import { useAuth } from "@context/auth-context";
 import { useTrigger } from "@helpers/use-trigger";
 import type { ReportDoc } from "@codex/types";
+
+// ─── Sort ─────────────────────────────────────────────────────────────────────
+
+type SortKey = "" | "daily:desc" | "daily:asc" | "weekly:desc" | "weekly:asc" | "reset:asc" | "reset:desc";
+
+function sortValue(doc: LivequeryDocument<AccountDoc>, key: SortKey): number {
+  const a = doc.getValue();
+  const u = a.codexUsage;
+  if (key === "daily:asc" || key === "daily:desc") {
+    if (u?.primaryWindow) return 100 - (u.primaryWindow.usedPercent ?? 0);
+    const d = a.dailyUsage;
+    return d && d.limit > 0 ? ((d.limit - d.count) / d.limit) * 100 : 0;
+  }
+  if (key === "weekly:asc" || key === "weekly:desc") {
+    if (u?.secondaryWindow) return 100 - (u.secondaryWindow.usedPercent ?? 0);
+    const w = a.weeklyUsage;
+    return w && w.limit > 0 ? ((w.limit - w.count) / w.limit) * 100 : 0;
+  }
+  if (key === "reset:asc" || key === "reset:desc") {
+    return u?.secondaryWindow?.resetAfterSeconds ?? u?.primaryWindow?.resetAfterSeconds ?? 0;
+  }
+  return 0;
+}
+
+function applySortKey(docs: LivequeryDocument<AccountDoc>[], key: SortKey): LivequeryDocument<AccountDoc>[] {
+  if (!key) return docs;
+  const dir = key.endsWith(":asc") ? 1 : -1;
+  return [...docs].sort((a, b) => (sortValue(a, key) - sortValue(b, key)) * dir);
+}
 
 function LogoutIcon() {
   return (
@@ -72,6 +102,7 @@ export default function Page() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [accountBusy, setAccountBusy] = useState<null | "login" | "import">(null);
   const [accountNotice, setAccountNotice] = useState<{ type: "info" | "error"; message: string } | null>(null);
+  const [sort, setSort] = useState<SortKey>("");
 
   async function copyLoginUrl() {
     setAccountNotice(null);
@@ -123,7 +154,7 @@ export default function Page() {
     }
   }
 
-  const accounts = accountDocs;
+  const accounts = applySortKey(accountDocs, sort);
   const reports = reportDocs as LivequeryDocument<ReportDoc>[];
   const accountSnapshots = useAccountSnapshots();
   const active = accountSnapshots.filter((a) => a.status === "active").length;
@@ -168,7 +199,32 @@ export default function Page() {
 
       <Box as="section" mt="6">
         <Flex justify="space-between" align={{ base: "stretch", sm: "center" }} direction={{ base: "column", sm: "row" }} gap="2.5" mb="3">
-          <Heading size="xs" color="fg.muted" textTransform="uppercase" letterSpacing="wider">Accounts</Heading>
+          <HStack gap="3">
+            <Heading size="xs" color="fg.muted" textTransform="uppercase" letterSpacing="wider">Accounts</Heading>
+            <NativeSelectRoot size="xs" variant="subtle" minW="36">
+              <NativeSelectField
+                value={sort}
+                onChange={(e) => setSort(e.target.value as SortKey)}
+                color="fg.muted"
+                fontSize="2xs"
+              >
+                <option value="">Sort: default</option>
+                <optgroup label="Daily remaining">
+                  <option value="daily:desc">Daily ↓ most first</option>
+                  <option value="daily:asc">Daily ↑ least first</option>
+                </optgroup>
+                <optgroup label="Weekly remaining">
+                  <option value="weekly:desc">Weekly ↓ most first</option>
+                  <option value="weekly:asc">Weekly ↑ least first</option>
+                </optgroup>
+                <optgroup label="Reset time">
+                  <option value="reset:asc">Reset ↑ soonest</option>
+                  <option value="reset:desc">Reset ↓ latest</option>
+                </optgroup>
+              </NativeSelectField>
+              <NativeSelectIndicator />
+            </NativeSelectRoot>
+          </HStack>
           <HStack gap="2" wrap="wrap">
             <Button variant="subtle" size="sm" loading={accountBusy === "login"} disabled={accountBusy !== null} onClick={() => void copyLoginUrl()} title="Khởi tạo phiên đăng nhập & copy login URL">
               <LinkIcon /> Copy login URL

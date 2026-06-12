@@ -29,6 +29,7 @@ export interface CodexUsage {
   limitReached: boolean;
   primaryWindow?: CodexUsageWindow;
   secondaryWindow?: CodexUsageWindow;
+  subscriptionExpiresAt?: number;
   error?: string;
 }
 

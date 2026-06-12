@@ -309,4 +309,23 @@ export class ChatGPTClient {
       },
     });
   }
+
+  /** Fetch /backend-api/invoices to get subscription billing info. Returns the raw Response. */
+  static fetchInvoices(accessToken: string, accountId: string, signal?: AbortSignal): Promise<Response> {
+    return fetch(`${CHATGPT_BASE}/backend-api/invoices?limit=4&account_id=${accountId}`, {
+      signal,
+      headers: {
+        accept: "*/*",
+        authorization: `Bearer ${accessToken}`,
+        "chatgpt-account-id": accountId,
+        "cache-control": "no-cache",
+        pragma: "no-cache",
+        origin: CHATGPT_BASE,
+        referer: `${CHATGPT_BASE}/`,
+        "user-agent": CLIENT_UA,
+        "x-openai-target-path": "/backend-api/invoices",
+        "x-openai-target-route": "/backend-api/invoices",
+      },
+    });
+  }
 }

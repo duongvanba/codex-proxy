@@ -6,7 +6,7 @@ import {
 } from "@chakra-ui/react";
 import { ActionError } from "@components/ActionError";
 import { useAccounts } from "@context/accounts-context";
-import { appStartedAt, formatReset, timeAgo } from "@/time";
+import { appStartedAt, formatReset, formatSubscriptionExpiry, timeAgo } from "@/time";
 import type { AccountDoc, CodexUsageWindow, UsageWindow } from "@codex/types";
 
 function SwitchIcon() {
@@ -71,6 +71,17 @@ function QuotaBar({ label, window, now }: { label: string; window?: CodexUsageWi
   );
 }
 
+function SubscriptionExpiry({ expiresAtMs, now }: { expiresAtMs?: number; now: number }) {
+  const label = formatSubscriptionExpiry(expiresAtMs, now);
+  if (!label) return null;
+  const isExpiring = expiresAtMs && (expiresAtMs - now) < 7 * 86_400_000;
+  return (
+    <Text fontSize="2xs" color={isExpiring ? "orange.fg" : "fg.muted"} textTransform="uppercase" letterSpacing="wide">
+      {label}
+    </Text>
+  );
+}
+
 function AccountUsage({ account, now }: { account: AccountDoc; now: number }) {
   const hasRemoteUsage = account.codexUsage?.primaryWindow || account.codexUsage?.secondaryWindow;
   if (account.codexUsage?.error) {
@@ -89,6 +100,7 @@ function AccountUsage({ account, now }: { account: AccountDoc; now: number }) {
           <UsageBar label="Weekly" usage={account.weeklyUsage} />
         </>
       )}
+      <SubscriptionExpiry expiresAtMs={account.codexUsage?.subscriptionExpiresAt} now={now} />
     </Stack>
   );
 }

@@ -210,6 +210,12 @@ export class AccountsService {
 
   // ─── Usage helpers ──────────────────────────────────────────────────────────
 
+  private resolveSubscriptionExpiry(fresh: number | undefined, cached: number | undefined): number | undefined {
+    if (fresh !== undefined) return fresh;
+    // Không giữ giá trị cũ nếu đã hết hạn — tránh hiện "EXPIRED" cho account vẫn active.
+    return cached && cached > Date.now() ? cached : undefined;
+  }
+
   private normalizeUsageWindow(value: any) {
     if (!value) return undefined;
     return {
@@ -218,6 +224,65 @@ export class AccountsService {
       resetAfterSeconds: Number(value.reset_after_seconds ?? 0),
       resetAt: Number(value.reset_at ?? 0),
     };
+  }
+
+  private async fetchSubscriptionExpiresAt(account: Account): Promise<number | undefined> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
+      const res = await ChatGPTClient.fetchInvoices(account.accessToken, account.accountId, controller.signal)
+        .finally(() => clearTimeout(timeout));
+      if (!res.ok) return undefined;
+      const body = await res.json();
+      return this.parseSubscriptionExpiresAt(body);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private parseSubscriptionExpiresAt(body: any): number | undefined {
+    try {
+      const items: any[] = body?.data ?? body?.invoices ?? [];
+      // amount_paid=0 vẫn là "paid" khi dùng Apple IAP / credits — chỉ filter theo status
+      const paid = items.filter((inv: any) => inv?.status === "paid");
+      if (!paid.length) return undefined;
+
+      const toMs = (v: any) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? (n < 4_000_000_000 ? n * 1000 : n) : 0;
+      };
+
+      // invoice.period_end === invoice.period_start (billing date, vô dụng).
+      // Ngày thực tế nằm trong lines.data[].period.end
+      let bestExpiresMs = 0;
+      let bestIntervalMs = 0;
+      for (const inv of paid) {
+        const lines: any[] = inv?.lines?.data ?? [];
+        for (const line of lines) {
+          const end = toMs(line?.period?.end);
+          const start = toMs(line?.period?.start);
+          if (end > bestExpiresMs) {
+            bestExpiresMs = end;
+            if (start > 0 && end > start) bestIntervalMs = end - start;
+          }
+        }
+      }
+
+      if (!bestExpiresMs) return undefined;
+
+      // Nếu đã qua (renew hôm nay chưa có invoice mới), project forward theo billing interval
+      if (bestExpiresMs <= Date.now()) {
+        if (bestIntervalMs > 0) {
+          while (bestExpiresMs <= Date.now()) bestExpiresMs += bestIntervalMs;
+          return bestExpiresMs;
+        }
+        return undefined;
+      }
+
+      return bestExpiresMs;
+    } catch {
+      return undefined;
+    }
   }
 
   private usageErrorMessage(status: number, text: string): string {
@@ -363,7 +428,11 @@ export class AccountsService {
             const retryRefresh = await this.refreshAccountAccessToken(account, { force: true });
             if (retryRefresh.ok && retryRefresh.refreshed) {
               changed = true;
-              res = await fetchQuota();
+              const [retryRes, subscriptionExpiresAt] = await Promise.all([
+                fetchQuota(),
+                this.fetchSubscriptionExpiresAt(account),
+              ]);
+              res = retryRes;
               const retryText = await res.text();
               if (res.ok) {
                 const body = JSON.parse(retryText);
@@ -374,6 +443,7 @@ export class AccountsService {
                   limitReached: Boolean(rateLimit?.limit_reached),
                   primaryWindow: this.normalizeUsageWindow(rateLimit?.primary_window),
                   secondaryWindow: this.normalizeUsageWindow(rateLimit?.secondary_window),
+                  subscriptionExpiresAt: this.resolveSubscriptionExpiry(subscriptionExpiresAt, account.codexUsage?.subscriptionExpiresAt),
                 };
                 if (body.plan_type && !account.chatgptPlanType) account.chatgptPlanType = body.plan_type;
                 if (account.status === "expired") account.status = "active";
@@ -403,7 +473,10 @@ export class AccountsService {
           return;
         }
 
-        const body = JSON.parse(text);
+        const [body, subscriptionExpiresAt] = await Promise.all([
+          Promise.resolve(JSON.parse(text)),
+          this.fetchSubscriptionExpiresAt(account),
+        ]);
         const rateLimit = body.rate_limit;
         account.codexUsage = {
           fetchedAt: now,
@@ -411,6 +484,7 @@ export class AccountsService {
           limitReached: Boolean(rateLimit?.limit_reached),
           primaryWindow: this.normalizeUsageWindow(rateLimit?.primary_window),
           secondaryWindow: this.normalizeUsageWindow(rateLimit?.secondary_window),
+          subscriptionExpiresAt: this.resolveSubscriptionExpiry(subscriptionExpiresAt, account.codexUsage?.subscriptionExpiresAt),
         };
         if (body.plan_type && !account.chatgptPlanType) account.chatgptPlanType = body.plan_type;
         if (account.status === "expired") account.status = "active";

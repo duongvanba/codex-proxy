@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { WebsocketGateway } from "@livequery/core";
+import { BunWebsocketGateway } from "@livequery/core/bun";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -60,7 +60,7 @@ const sseStream = new SseStreamService();
 
 // LiveQuery WebSocket Gateway — chạy "external" mode, Bun.serve sẽ inject WS trực tiếp
 // vào gateway qua attachBunUpgrade/getBunWebsocketHandlers, không mở port riêng 9879.
-const websocketGateway = new WebsocketGateway("external");
+const websocketGateway = new BunWebsocketGateway();
 
 const accounts = new AccountsService(auth);
 const watcher = new WatcherService(accounts);

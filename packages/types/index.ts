@@ -24,6 +24,7 @@ export type AccountDoc = Doc<{
     limitReached: boolean;
     primaryWindow?: CodexUsageWindow;
     secondaryWindow?: CodexUsageWindow;
+    subscriptionExpiresAt?: number;
   };
   chatgptPlanType?: string;
   selected?: boolean;

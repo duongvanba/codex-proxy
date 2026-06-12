@@ -12,25 +12,25 @@ export default defineConfig({
     allowedHosts: ["opaip.amazingproxy.xyz", "codex", "codex.duyenruby.com"],
     proxy: {
       "/livequery/realtime-updates": {
-        target: "http://127.0.0.1:9876",
+        target: "http://192.168.2.4:9876",
         ws: true,
         changeOrigin: true,
       },
       // Forward API calls to Bun backend in dev.
       "/livequery": {
-        target: "http://127.0.0.1:9876",
+        target: "http://192.168.2.4:9876",
         changeOrigin: true,
       },
       "/auth-api": {
-        target: "http://127.0.0.1:9876",
+        target: "http://192.168.2.4:9876",
         changeOrigin: true,
       },
       "/v1": {
-        target: "http://127.0.0.1:9876",
+        target: "http://192.168.2.4:9876",
         changeOrigin: true,
       },
       "/backend-api": {
-        target: "http://127.0.0.1:9876",
+        target: "http://192.168.2.4:9876",
         changeOrigin: true,
       },
     },
