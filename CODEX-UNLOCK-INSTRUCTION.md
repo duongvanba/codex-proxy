@@ -115,6 +115,26 @@ open(filepath, 'w').write(content)
 print("Done")
 ```
 
+### 2.2b — `remote-connections-settings-*.js` — Mở đủ 3 tab trong Connections
+
+Mục **Settings → Connections** có 3 tab: `control-this-mac` (gate `Be`), `access-other-devices` (gate `Ve`), `ssh` (`Pt`, luôn hiện). Mảng tab: `Ft=[...Be?Nt:[],...Ve?Mt:[],...Pt]`, với `Be=ye&&!0`, `Ve=xe&&(ye||!1)`, và `ye=Fe()` (showRemoteControlConnectionsSection), `xe=!c` (showControlOtherDevices) — mặc định false → chỉ thấy tab SSH.
+
+> ⚠️ **Quan trọng:** chỉ ép `Be`/`Ve` thì 2 tab **HIỆN nhưng KHÔNG bấm được** — vì selectedKey `He=Ie({showControlThisMacTab:Be,showControlOtherDevices:xe,showRemoteControlConnectionsSection:ye,…})` và onSelect vẫn dựa vào `ye`/`xe`. Phải ép **`ye`/`xe`** ở nguồn.
+
+```python
+filepath = 'webview/assets/remote-connections-settings-M4XaDoJ4.js'  # điều chỉnh tên
+content = open(filepath).read()
+# fix đủ: ép feature-visible flags ở nguồn -> tab hiện VÀ bấm được
+assert 'ye=Fe(),xe=!c' in content
+content = content.replace('ye=Fe(),xe=!c', 'ye=!0,xe=!0', 1)
+# redundant nhưng vô hại: ép luôn gate mảng tab
+content = content.replace('Be=ye&&!0,Ve=xe&&(ye||!1)', 'Be=!0,Ve=!0', 1)
+open(filepath, 'w').write(content)
+print("3 tabs unlocked + clickable")
+```
+
+> Grep tìm: `Ft=[...Be?Nt:[],...Ve?Mt:[],...Pt]` rồi truy ngược tới `ye=Fe(),xe=!c` (cùng scope, gần `Ce=v==null,we=ye&&T==null`). `Nt`=control-this-mac, `Mt`=access-other-devices, `Pt`=ssh.
+
 ### 2.3 — `app-main-*.js` — Codex Mobile + Remote Connections
 
 File này có 2 patch riêng biệt:
