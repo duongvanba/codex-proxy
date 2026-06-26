@@ -283,8 +283,8 @@ export function AccountCard({
 
         {/* Main content */}
         <Box flex="1" minW="0">
-          <HStack gap="1.5" minW="0" mb="0.5">
-            <Text fontWeight="semibold" fontSize="sm" truncate lineHeight="short">{account.email}</Text>
+          <HStack gap="1.5" minW="0" mb="0.5" overflow="hidden">
+            <Text fontWeight="semibold" fontSize="sm" truncate lineHeight="short" flex="1" minW="0">{account.email}</Text>
             <Badge
               size="sm"
               colorPalette={planPalette(account.chatgptPlanType || "")}
