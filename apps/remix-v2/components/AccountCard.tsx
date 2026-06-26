@@ -104,7 +104,7 @@ function AccountUsage({ account, now }: { account: AccountDoc; now: number }) {
 
   return (
     <Box mt="2">
-      <SimpleGrid columns={2} gap="2.5">
+      <SimpleGrid columns={{ base: 1, sm: 2 }} gap="1.5">
         {hasRemoteUsage ? (
           <>
             <QuotaBar label="Ngày" window={account.codexUsage?.primaryWindow} now={now} />

@@ -148,15 +148,15 @@ export default function Page() {
         </HStack>
       </Flex>
 
-      <Flex justify="center" gap="2" mt="4" wrap="wrap">
+      <Flex justify="center" gap="2" mt="4">
         <Button variant="subtle" size="sm" loading={accountBusy === "login"} disabled={accountBusy !== null} onClick={() => void copyLoginUrl()} title="Khởi tạo phiên đăng nhập & copy login URL">
-          <LinkIcon /> Copy URL đăng nhập
+          <LinkIcon /> <Box as="span" display={{ base: "none", sm: "inline" }}>Copy URL đăng nhập</Box>
         </Button>
         <Button variant="subtle" size="sm" loading={accountBusy === "import"} disabled={accountBusy !== null} onClick={() => void importLoginSession()} title="Dán callback URL hoặc account JSON để thêm account">
-          <ImportIcon /> Nhập phiên
+          <ImportIcon /> <Box as="span" display={{ base: "none", sm: "inline" }}>Nhập phiên</Box>
         </Button>
         <Button variant="subtle" size="sm" loading={checkQuota.loading} onClick={() => void checkQuota()} title="Kiểm tra quota toàn bộ account">
-          <GaugeIcon /> Kiểm tra quota
+          <GaugeIcon /> <Box as="span" display={{ base: "none", sm: "inline" }}>Kiểm tra quota</Box>
         </Button>
       </Flex>
 
@@ -215,8 +215,8 @@ export default function Page() {
           </Stack>
         </Box>
 
-        {/* Cột phải: nhật ký */}
-        <Box position={{ lg: "sticky" }} top={{ lg: "6" }}>
+        {/* Cột phải: nhật ký — ẩn trên mobile */}
+        <Box position={{ lg: "sticky" }} top={{ lg: "6" }} display={{ base: "none", lg: "block" }}>
           <ReportsPanel reports={reports} reportsLoading$={reportsCollection.loading} />
         </Box>
       </Box>
