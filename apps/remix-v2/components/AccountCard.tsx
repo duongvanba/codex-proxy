@@ -266,7 +266,7 @@ export function AccountCard({
         bg={accentColor}
       />
 
-      <Flex align="flex-start" gap="3" p="3" pl="4">
+      <Flex align="center" gap="3" p="3" pl="4">
         {/* Avatar / Status */}
         <Center
           flex="0 0 auto"
@@ -276,7 +276,6 @@ export function AccountCard({
           color={isUsing ? "green.fg" : "fg.muted"}
           fontSize="xs"
           fontWeight="bold"
-          mt="0.5"
           title={isUsing ? "Đang dùng account này" : undefined}
         >
           {isUsing ? <Spinner size="xs" color="green.solid" /> : (account.email || "?").charAt(0).toUpperCase()}
