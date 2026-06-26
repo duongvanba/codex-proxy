@@ -49,7 +49,7 @@ function UsageRow({ label, right, value, danger, pending }: {
   label: string; right?: React.ReactNode; value: number; danger?: boolean; pending?: boolean;
 }) {
   return (
-    <Box>
+    <Box minW="0" w="full">
       <Flex justify="space-between" fontSize="2xs" color="fg.muted" textTransform="uppercase" letterSpacing="wide" mb="1">
         <Text fontWeight="medium">{label}</Text>
         <Box as="span">{pending ? <Skeleton height="2.5" width="10" rounded="sm" /> : right}</Box>
@@ -103,7 +103,7 @@ function AccountUsage({ account, now }: { account: AccountDoc; now: number }) {
   const isExpiring = expiresAt && (expiresAt - now) < 7 * 86_400_000;
 
   return (
-    <Box mt="2">
+    <Box mt="2" overflow="hidden" minW="0">
       <SimpleGrid columns={{ base: 1, sm: 2 }} gap="1.5">
         {hasRemoteUsage ? (
           <>
