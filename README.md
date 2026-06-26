@@ -78,11 +78,11 @@ Backend theo chuẩn LiveQuery (`hono-bun-backend`):
 
 ```
 app/
-  page.tsx                                                — trang chủ: stats, account list
+  page.tsx                                                — trang chủ: account list
   accounts/[accountId]/page.tsx                           — danh sách hosts
   accounts/[accountId]/hosts/[hostId]/page.tsx            — tạo chat mới
   accounts/[accountId]/hosts/[hostId]/chats/[chatId]/page.tsx — route chat cụ thể
-components/    — ChatPanel, ProjectSidebar, RemoteEnrollPanel, AccountCard, StatsGrid, ...
+components/    — ChatPanel, ProjectSidebar, RemoteEnrollPanel, AccountCard, ...
 context/      — hosts-context, workspace-context
 helpers/      — livequery-client, NextRoutingStyle (file-based routing kiểu Next)
 ```
