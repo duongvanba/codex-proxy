@@ -3,7 +3,7 @@ import { BehaviorSubject } from "rxjs";
 import { useAction, useCollection, useObservable } from "@livequery/react";
 import { useEffect, useState } from "react";
 import {
-  Badge, Box, Button, Container, Flex, Heading, HStack, IconButton, NativeSelectField, NativeSelectIndicator, NativeSelectRoot, Spinner, Stack, Text,
+  Badge, Box, Button, Container, Flex, Heading, HStack, NativeSelectField, NativeSelectIndicator, NativeSelectRoot, Spinner, Stack, Text,
 } from "@chakra-ui/react";
 import type { AccountDoc } from "@codex/types";
 import { AccountCard } from "@components/AccountCard";
@@ -11,7 +11,6 @@ import { ReportsPanel } from "@components/ReportsPanel";
 import { StatsGrid } from "@components/StatsGrid";
 import { ThemeToggle } from "@components/ThemeToggle";
 import { useAccounts, useAccountSnapshots } from "@context/accounts-context";
-import { useAuth } from "@context/auth-context";
 import { useTrigger } from "@helpers/use-trigger";
 import type { ReportDoc } from "@codex/types";
 
@@ -44,15 +43,7 @@ function applySortKey(docs: LivequeryDocument<AccountDoc>[], key: SortKey): Live
   return [...docs].sort((a, b) => (sortValue(a, key) - sortValue(b, key)) * dir);
 }
 
-function LogoutIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-      <polyline points="16 17 21 12 16 7" />
-      <line x1="21" y1="12" x2="9" y2="12" />
-    </svg>
-  );
-}
+
 function LinkIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -93,13 +84,10 @@ export default function Page() {
   const reportsCollection = useCollection<ReportDoc>("reports", { mode: "server-first", filters: { ":limit": 200 } });
   const reportDocs = useObservable(reportsCollection.items, []);
   const reportError = useObservable(reportsCollection.error, null);
-  const { logout: authLogout, currentEmail, currentDisplayName } = useAuth();
-
   const checkQuota = useAction(() => accountsCollection.trigger("fetch-quota"));
 
   const trigger = useTrigger();
   const [now, setNow] = useState(Date.now());
-  const [loggingOut, setLoggingOut] = useState(false);
   const [accountBusy, setAccountBusy] = useState<null | "login" | "import">(null);
   const [accountNotice, setAccountNotice] = useState<{ type: "info" | "error"; message: string } | null>(null);
   const [sort, setSort] = useState<SortKey>(() => (localStorage.getItem("codex:sort") as SortKey) || "");
@@ -144,16 +132,6 @@ export default function Page() {
     return () => clearInterval(id);
   }, []);
 
-  async function logout() {
-    if (!confirm("Đăng xuất khỏi phiên hiện tại?")) return;
-    setLoggingOut(true);
-    try {
-      authLogout();
-    } finally {
-      setLoggingOut(false);
-    }
-  }
-
   const accounts = applySortKey(accountDocs, sort);
   const reports = reportDocs as LivequeryDocument<ReportDoc>[];
   const accountSnapshots = useAccountSnapshots();
@@ -171,27 +149,8 @@ export default function Page() {
       <Container maxW="6xl" py="6">
       <Flex as="header" align="center" gap="3" wrap="wrap" mb="2">
         <Heading size="lg">Codex Proxy</Heading>
-        <Badge
-          colorPalette={degraded ? "red" : "green"}
-          variant="surface"
-          maxW={{ base: "55vw", md: "sm" }}
-          title={currentDisplayName || currentEmail || undefined}
-        >
-          <Text truncate>{degraded ? "Degraded" : (currentDisplayName || currentEmail || "Online")}</Text>
-        </Badge>
         <HStack gap="2" ml="auto">
           <ThemeToggle />
-          <IconButton
-            aria-label="Đăng xuất"
-            title="Đăng xuất"
-            colorPalette="red"
-            variant="subtle"
-            size="sm"
-            loading={loggingOut}
-            onClick={() => void logout()}
-          >
-            <LogoutIcon />
-          </IconButton>
         </HStack>
       </Flex>
 
