@@ -1,0 +1,21 @@
+{
+  // Base config — shared options only, does NOT compile anything directly.
+  // Each app/package has its own tsconfig.json that extends this.
+  "files": [],
+  "references": [
+    { "path": "./apps/honojs" },
+    { "path": "./apps/remix-v2" },
+    { "path": "./packages/types" }
+  ],
+  "compilerOptions": {
+    // Shared options inherited by all apps
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  }
+}

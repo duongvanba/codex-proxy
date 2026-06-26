@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+*.log
+logs/
+accounts.json
+account-state.json
+internal-auth.json
+apps/remix-v2/build
+apps/remix-v2/node_modules
+apps/honojs/node_modules
