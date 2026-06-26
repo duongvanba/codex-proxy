@@ -8,7 +8,6 @@ import {
 import type { AccountDoc } from "@codex/types";
 import { AccountCard } from "@components/AccountCard";
 import { ReportsPanel } from "@components/ReportsPanel";
-import { StatsGrid } from "@components/StatsGrid";
 import { ThemeToggle } from "@components/ThemeToggle";
 import { useAccounts, useAccountSnapshots } from "@context/accounts-context";
 import { useTrigger } from "@helpers/use-trigger";
@@ -135,11 +134,6 @@ export default function Page() {
   const accounts = applySortKey(accountDocs, sort);
   const reports = reportDocs as LivequeryDocument<ReportDoc>[];
   const accountSnapshots = useAccountSnapshots();
-  const active = accountSnapshots.filter((a) => a.status === "active").length;
-  const using = accountSnapshots.filter((a) => a.selected && a.status === "active").length;
-  const limited = accountSnapshots.filter((a) => a.status === "rate_limited").length;
-  const totalRequests = accountSnapshots.reduce((sum, a) => sum + (a.requestCount || 0), 0);
-  const degraded = Boolean(accountError || reportError);
 
   return (
     <Box
@@ -153,8 +147,6 @@ export default function Page() {
           <ThemeToggle />
         </HStack>
       </Flex>
-
-      <StatsGrid using={using} active={active} limited={limited} totalRequests={totalRequests} accountCount={accounts.length} />
 
       <Flex justify="center" gap="2" mt="4" wrap="wrap">
         <Button variant="subtle" size="sm" loading={accountBusy === "login"} disabled={accountBusy !== null} onClick={() => void copyLoginUrl()} title="Khởi tạo phiên đăng nhập & copy login URL">
