@@ -240,7 +240,7 @@ export function AccountCard({
 
   return (
     <Box
-      bg="bg.panel"
+      bg={isUsing ? "linear-gradient(135deg, #0a1f10 0%, #0f2d18 100%)" : "bg.panel"}
       borderWidth="1px"
       borderColor={isUsing ? "green.subtle" : "border"}
       rounded="xl"

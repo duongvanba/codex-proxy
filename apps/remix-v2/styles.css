@@ -2660,9 +2660,16 @@ button:where(:not([class*="chakra"])):disabled { cursor: not-allowed; opacity: .
   align-items: center;
   color: var(--muted);
   display: flex;
+  flex-direction: column;
   gap: 10px;
   justify-content: center;
-  min-height: 100vh;
+  height: 100dvh;
+}
+.app-boot .inline-spinner {
+  height: 32px;
+  width: 32px;
+  border-width: 3px;
+  margin-right: 0;
 }
 
 /* ─── Header actions (theme toggle · ONLINE · logout) ─────────────────────── */
