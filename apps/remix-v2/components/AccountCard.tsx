@@ -52,7 +52,9 @@ function UsageRow({ label, right, value, danger, pending }: {
     <Box minW="0" w="full">
       <Flex justify="space-between" fontSize="2xs" color="fg.muted" textTransform="uppercase" letterSpacing="wide" mb="1">
         <Text fontWeight="medium">{label}</Text>
-        <Box as="span">{pending ? <Skeleton height="2.5" width="10" rounded="sm" /> : right}</Box>
+        <Box as="span" display={{ base: "none", sm: "block" }}>
+          {pending ? <Skeleton height="2.5" width="10" rounded="sm" /> : right}
+        </Box>
       </Flex>
       {pending ? (
         <Skeleton height="1" rounded="full" />
@@ -104,7 +106,7 @@ function AccountUsage({ account, now }: { account: AccountDoc; now: number }) {
 
   return (
     <Box mt="2" overflow="hidden" minW="0">
-      <SimpleGrid columns={{ base: 1, sm: 2 }} gap="1.5">
+      <SimpleGrid columns={2} gap="2">
         {hasRemoteUsage ? (
           <>
             <QuotaBar label="Ngày" window={account.codexUsage?.primaryWindow} now={now} />
